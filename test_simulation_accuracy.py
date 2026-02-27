@@ -39,7 +39,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
+from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES, CALIBRATION_MODE
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
                             generate_y_nonparametric, _fit_lognormal)
@@ -51,7 +51,7 @@ FLAG_THRESHOLD = 0.01
 
 def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
                   y_params, n_sims=50, all_distinct=False, seed=None,
-                  freq_dict=None, n_cal=300):
+                  freq_dict=None, n_cal=300, calibration_mode=None):
     """Generate *n_sims* datasets and return accuracy statistics.
 
     Parameters
@@ -63,6 +63,9 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
     -------
     dict with mean_rho, std_rho, diff, flagged.
     """
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
+
     gen_fn = get_generator(generator)
     rng = np.random.default_rng(seed)
     rhos = np.empty(n_sims)
@@ -72,7 +75,8 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
     if generator == "nonparametric":
         cal_rho = calibrate_rho(
             n, n_distinct, distribution_type, rho_target, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal)
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+            calibration_mode=calibration_mode)
     elif generator == "copula":
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_target, y_params,
@@ -107,7 +111,8 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
 
 def run_accuracy_tests(generators=None, rho_targets=None, n_sims=50,
                        cases=None, n_distinct_values=None, dist_types=None,
-                       seed=None, custom_freq=None, n_cal=300):
+                       seed=None, custom_freq=None, n_cal=300,
+                       calibration_mode=None):
     """Test accuracy across all (or filtered) scenarios.
 
     Parameters
@@ -158,7 +163,7 @@ def run_accuracy_tests(generators=None, rho_targets=None, n_sims=50,
                     result = test_scenario(
                         n, k, dt if not ad else None, rho_t, gen,
                         y_params, n_sims=n_sims, all_distinct=ad, seed=seed,
-                        n_cal=n_cal)
+                        n_cal=n_cal, calibration_mode=calibration_mode)
                     rows.append({
                         "case": case_id,
                         "n": n,
@@ -189,7 +194,8 @@ def run_accuracy_tests(generators=None, rho_targets=None, n_sims=50,
                     result = test_scenario(
                         n, k, "custom", rho_t, gen, y_params,
                         n_sims=n_sims, all_distinct=False, seed=seed,
-                        freq_dict=freq_dict, n_cal=n_cal)
+                        freq_dict=freq_dict, n_cal=n_cal,
+                        calibration_mode=calibration_mode)
                     rows.append({
                         "case": case_id,
                         "n": n,
@@ -245,7 +251,8 @@ def _parse_list(s, cast=str):
 
 def main(n_sims=50, generators=None, rho_targets=None, cases=None,
          n_distinct_values=None, dist_types=None, custom_freq=None,
-         seed=42, threshold=0.01, outfile=None, verbose=True, n_cal=300):
+         seed=42, threshold=0.01, outfile=None, verbose=True, n_cal=300,
+         calibration_mode=None):
     """Run accuracy tests.  Callable without CLI.
 
     Parameters
@@ -286,7 +293,8 @@ def main(n_sims=50, generators=None, rho_targets=None, cases=None,
     df = run_accuracy_tests(
         generators=generators, rho_targets=rho_targets, n_sims=n_sims,
         cases=cases, n_distinct_values=n_distinct_values, dist_types=dist_types,
-        seed=seed, custom_freq=custom_freq, n_cal=n_cal)
+        seed=seed, custom_freq=custom_freq, n_cal=n_cal,
+        calibration_mode=calibration_mode)
 
     if verbose:
         print_report(df)
@@ -319,6 +327,10 @@ if __name__ == "__main__":
                              "Requires --case. Adds this custom scenario to the test.")
     parser.add_argument("--n-cal", type=int, default=300,
                         help="Calibration samples per bisection (default: 300)")
+    parser.add_argument("--calibration-mode",
+                        choices=["multipoint", "single"],
+                        default=None,
+                        help="Calibration mode (default: multipoint)")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outfile", type=str, default=None,
                         help="Save results to CSV")
@@ -347,4 +359,5 @@ if __name__ == "__main__":
     main(n_sims=args.n_sims, generators=gens, rho_targets=rhos,
          cases=cases_arg, n_distinct_values=nvals, dist_types=dtypes,
          custom_freq=custom_freq_arg, seed=args.seed, threshold=args.threshold,
-         outfile=args.outfile, n_cal=args.n_cal)
+         outfile=args.outfile, n_cal=args.n_cal,
+         calibration_mode=args.calibration_mode)

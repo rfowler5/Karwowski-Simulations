@@ -28,7 +28,7 @@ from joblib import Parallel, delayed
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_SIMS, ALPHA, TARGET_POWER,
-                    POWER_SEARCH_DIRECTION)
+                    POWER_SEARCH_DIRECTION, CALIBRATION_MODE)
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
                             generate_y_nonparametric, _fit_lognormal)
@@ -37,7 +37,8 @@ from spearman_helpers import spearman_rho_pvalue_2d
 
 def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
                    generator="nonparametric", n_sims=None, alpha=None,
-                   all_distinct=False, seed=None, freq_dict=None):
+                   all_distinct=False, seed=None, freq_dict=None,
+                   calibration_mode=None):
     """Estimate power of a two-sided Spearman test via Monte Carlo.
 
     Parameters
@@ -57,6 +58,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         n_sims = N_SIMS
     if alpha is None:
         alpha = ALPHA
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
 
     gen_fn = get_generator(generator)
     rng = np.random.default_rng(seed)
@@ -66,7 +69,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     if generator == "nonparametric":
         cal_rho = calibrate_rho(
             n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict)
+            all_distinct=all_distinct, freq_dict=freq_dict,
+            calibration_mode=calibration_mode)
     elif generator == "copula":
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
@@ -98,7 +102,7 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                        generator="nonparametric", target_power=None,
                        n_sims=None, alpha=None, all_distinct=False,
                        direction="positive", seed=None, tolerance=0.49e-4,
-                       freq_dict=None):
+                       freq_dict=None, calibration_mode=None):
     """Binary search for the minimum |rho| detectable at *target_power*.
 
     Parameters
@@ -114,6 +118,8 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
         n_sims = N_SIMS
     if alpha is None:
         alpha = ALPHA
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
 
     if direction == "positive":
         lo, hi = 0.25, 0.42
@@ -125,7 +131,8 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
         pw = estimate_power(n, n_distinct, distribution_type, mid, y_params,
                             generator=generator, n_sims=n_sims, alpha=alpha,
                             all_distinct=all_distinct, seed=seed,
-                            freq_dict=freq_dict)
+                            freq_dict=freq_dict,
+                            calibration_mode=calibration_mode)
         if direction == "positive":
             if pw < target_power:
                 lo = mid
@@ -149,12 +156,13 @@ def _search_directions(case_id):
 
 
 def _power_one_scenario(case_id, n, y_params, k, dt, all_distinct,
-                        direction, generator, n_sims, seed):
+                        direction, generator, n_sims, seed,
+                        calibration_mode=None):
     """Run min_detectable_rho for a single (case, k, dt, direction)."""
     md = min_detectable_rho(
         n, k, dt, y_params, generator=generator,
         n_sims=n_sims, all_distinct=all_distinct, direction=direction,
-        seed=seed)
+        seed=seed, calibration_mode=calibration_mode)
     return {
         "case": case_id,
         "n": n,
@@ -169,7 +177,7 @@ def _power_one_scenario(case_id, n, y_params, k, dt, all_distinct,
 
 def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                       cases=None, n_distinct_values=None, dist_types=None,
-                      n_jobs=1):
+                      n_jobs=1, calibration_mode=None):
     """Run power analysis for all (or filtered) scenarios.
 
     Parameters
@@ -210,13 +218,15 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                 for d in directions:
                     sc_seed = (seed + scenario_idx) if seed is not None else None
                     scenarios.append((case_id, n, y_params, k, dt, False,
-                                     d, generator, n_sims, sc_seed))
+                                     d, generator, n_sims, sc_seed,
+                                     calibration_mode))
                     scenario_idx += 1
 
         for d in directions:
             sc_seed = (seed + scenario_idx) if seed is not None else None
             scenarios.append((case_id, n, y_params, n, None, True,
-                              d, generator, n_sims, sc_seed))
+                              d, generator, n_sims, sc_seed,
+                              calibration_mode))
             scenario_idx += 1
 
     if n_jobs == 1:

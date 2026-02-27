@@ -39,7 +39,12 @@ The non-parametric method is the recommended Monte Carlo approach, especially wh
 3. Mixing the two at weight rho: `mixed = rho_cal * s_x + sqrt(1 - rho_cal^2) * s_noise`.
 4. Mapping the resulting ordering onto random draws from the target log-normal y-marginal.
 
-**Calibration**: Because ties attenuate the realised Spearman rho relative to the mixing weight, the method includes an automatic calibration step. For each tie structure (N, k, distribution type), a bisection search over 300 calibration samples computes a rho-independent attenuation ratio. This ratio is then applied linearly to any target rho, meaning calibration runs only once per unique tie structure and is reused across all rho values tested during bisection -- a major performance improvement over per-rho calibration.
+**Calibration**: Because ties attenuate the realised Spearman rho relative to the mixing weight, the method includes an automatic calibration step. Two modes are available (configurable via `config.CALIBRATION_MODE` or `--calibration-mode`):
+
+- **Multipoint (default)**: Probes at rho = 0.10, 0.30, 0.50 and interpolates the calibration curve. Captures nonlinear attenuation (ratio varies with rho) and reduces bias to typically under 0.01. **Accuracy**: Better than single-point when attenuation is nonlinear (e.g. custom or extreme tie structures). **Performance**: ~3× slower calibration on first run per tie structure (~9s vs ~3s) because it probes three values instead of one; cached thereafter and reused for all rho targets.
+- **Single-point**: Probes only at rho = 0.30 and applies a constant ratio. Faster (~3× less calibration cost) but can have 0.01–0.03 bias when attenuation is nonlinear. Use for quick exploratory runs.
+
+In both modes, calibration runs once per unique tie structure and is reused across all rho values during bisection — a major performance improvement over per-rho calibration.
 
 **Why this method?** Unlike the Gaussian copula, it does not rely on the continuous-marginals assumption. Unlike the linear model, it does not assume a parametric relationship between x and y. It handles tied x-values naturally because the mixing operates directly in rank space.
 
@@ -126,6 +131,13 @@ python run_simulation.py --skip-linear --skip-copula   # nonparametric + asympto
 python run_simulation.py --skip-nonparametric           # copula + linear + asymptotic
 ```
 
+### Calibration mode (nonparametric only)
+
+```bash
+python run_simulation.py --calibration-mode multipoint   # default: more accurate, ~3× calibration cost
+python run_simulation.py --calibration-mode single       # faster calibration for exploratory runs
+```
+
 ### Filter scenarios
 
 ```bash
@@ -148,6 +160,9 @@ python run_single_scenario.py --case 1 --all-distinct --ci-only --n-reps 20 --n-
 
 # Custom frequency distribution (counts must sum to case's n)
 python run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
+
+# Calibration mode (multipoint default, single for faster runs)
+python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --calibration-mode single
 ```
 
 ### Asymptotic tie-correction modes
@@ -176,9 +191,12 @@ python test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
 
 # Save results to CSV
 python test_simulation_accuracy.py --n-sims 200 --outfile accuracy_report.csv
+
+# Calibration mode (multipoint default, single for faster runs)
+python test_simulation_accuracy.py --n-sims 200 --calibration-mode single
 ```
 
-The script flags scenarios where |mean_simulated_rho - target_rho| > 0.01 (configurable via `--threshold`).
+The script flags scenarios where |mean_simulated_rho - target_rho| > 0.01 (configurable via `--threshold`). With default n_sims=50–200, some flags may be Monte Carlo noise. To get all scenarios to pass, you may need to increase `--n-sims` to 1000, 5000, or 10000 depending on the tie structure and threshold.
 
 ## Output
 
@@ -214,7 +232,7 @@ The Gaussian copula assumes continuous marginals for the rank-to-normal-to-rank 
 
 With tied x-values, the midrank representation has lower variance than distinct ranks. This means the rank-mixing formula `mixed = rho * s_x + sqrt(1-rho^2) * s_noise` produces a Spearman rho slightly below the target rho. The calibration step computes a rho-independent attenuation ratio by probing at a fixed rho (0.30) and using bisection over 300 samples. This ratio is then multiplied by any target rho to compensate for the attenuation. The ratio is cached per (n, k, dist_type), so the cost is ~3s per unique tie structure.
 
-**If calibration fails for a custom tie structure:** Run `test_simulation_accuracy` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000). If it still fails, the attenuation may be nonlinear (ratio varies with rho)—consider implementing **multi-point calibration**: probe at several targets (e.g. 0.10, 0.30, 0.50), fit a curve (rho_in vs rho_target), and use that to map any target to the required input. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
+**If calibration fails for a custom tie structure:** Run `test_simulation_accuracy` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
@@ -319,7 +337,7 @@ Copula and linear generators have similar per-sim cost but no calibration overhe
 - **Benchmarking:** Run sequential and parallel benchmarks separately, one at a time. Concurrent runs cause CPU contention and invalidate timing results.
 - Use `--n-sims 500` for exploratory runs (seconds to minutes) vs `10000` for production.
 - Use `python run_simulation.py --n-jobs 4` to parallelize across 4 cores and (if this is actually 2 cores with hyperthreading) roughly halve full-grid runtimes. Use `--n-jobs -1` to use all available cores.
-- The calibration step adds ~3s per unique (N, k, distribution) tie structure on first run; cached thereafter and reused across all rho values.
+- The calibration step adds ~3s (single-point) or ~9s (multipoint, default) per unique (N, k, distribution) tie structure on first run; cached thereafter and reused across all rho values. Use `--calibration-mode single` for faster exploratory runs.
 - Bootstrap CIs dominate total runtime when using many reps and resamples. With `--n-reps 200`, use `--n-boot 500` (bootstrap noise is negligible). With `--n-reps 1600` or higher, `--n-boot 200`–`400` suffices; `--n-boot 500` is comfortable. Use `--n-reps 20 --n-boot 500` for quick checks.
 - Use `run_single_scenario.py` to test individual scenarios quickly before committing to a full run.
 - Filter scenarios with `--cases`, `--n-distinct`, `--dist-types` to reduce the grid.

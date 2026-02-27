@@ -282,8 +282,128 @@ def _fast_spearman(x_ranks, y):
     return num / denom
 
 
+def _mean_rho(rho_in, template, y_params, n_cal, seed):
+    """Mean realised Spearman rho over n_cal samples for given rho_in."""
+    cal_rng = np.random.default_rng(seed)
+    mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
+    total = 0.0
+    for _ in range(n_cal):
+        x = template.copy()
+        cal_rng.shuffle(x)
+        x_ranks = rankdata(x, method="average")
+        nn = len(x_ranks)
+        noise_ranks = cal_rng.permutation(nn) + 1.0
+
+        s_x = x_ranks - np.mean(x_ranks)
+        sd_x = np.std(x_ranks, ddof=0)
+        if sd_x > 0:
+            s_x /= sd_x
+        s_n = noise_ranks - np.mean(noise_ranks)
+        s_n /= np.std(noise_ranks, ddof=0)
+
+        rho_c = np.clip(rho_in, -0.999, 0.999)
+        mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
+
+        y_vals = cal_rng.lognormal(mean=mu, sigma=sigma, size=nn)
+        y_vals.sort()
+        y_final = np.empty(nn)
+        y_final[np.argsort(mixed)] = y_vals
+
+        total += _fast_spearman(x_ranks, y_final)
+    return total / n_cal
+
+
+def _bisect_for_probe(probe, template, y_params, n_cal, seed,
+                      n_iter=25, tol=5e-5):
+    """Bisect to find rho_in such that _mean_rho(rho_in, ...) ≈ probe.
+
+    Returns rho_in (float) or None if the probe is unreachable.
+    """
+    lo, hi = 0.0, min(probe * 2.0, 0.999)
+    if _mean_rho(hi, template, y_params, n_cal, seed) < probe:
+        hi = 0.999
+    if _mean_rho(hi, template, y_params, n_cal, seed) < probe:
+        return None  # unreachable
+
+    for _ in range(n_iter):
+        mid = (lo + hi) / 2.0
+        observed = _mean_rho(mid, template, y_params, n_cal, seed)
+        if observed < probe:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+
+    return (lo + hi) / 2.0
+
+
+def _interp_with_extrapolation(x, xp, fp):
+    """Linear interpolation with linear extrapolation beyond endpoints."""
+    if x <= xp[0]:
+        if len(xp) >= 2:
+            slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+            return fp[0] + slope * (x - xp[0])
+        return fp[0]
+    if x >= xp[-1]:
+        if len(xp) >= 2:
+            slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+            return fp[-1] + slope * (x - xp[-1])
+        return fp[-1]
+    return float(np.interp(x, xp, fp))
+
+
+_CALIBRATION_CACHE_MULTIPOINT = {}
+_MULTIPOINT_PROBES = [0.10, 0.30, 0.50]
+
+
+def _calibrate_rho_multipoint(n, n_distinct, distribution_type, rho_target,
+                               y_params, all_distinct=False, n_cal=300,
+                               seed=99, freq_dict=None):
+    """Multi-point calibration: probe at 3 rho values, interpolate."""
+    cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal,
+                 "multipoint")
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_MULTIPOINT:
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                    freq_dict, all_distinct)
+        pairs = []
+        for probe in _MULTIPOINT_PROBES:
+            rho_in = _bisect_for_probe(probe, template, y_params,
+                                        n_cal, seed)
+            if rho_in is not None:
+                pairs.append((probe, rho_in))
+
+        _CALIBRATION_CACHE_MULTIPOINT[cache_key] = pairs
+
+    pairs = sorted(_CALIBRATION_CACHE_MULTIPOINT[cache_key], key=lambda p: p[0])
+
+    if not pairs:
+        # No probes succeeded -- return rho_target unmodified
+        return float(np.clip(rho_target, -0.999, 0.999))
+
+    abs_target = abs(rho_target)
+    sign = 1.0 if rho_target >= 0 else -1.0
+
+    if len(pairs) == 1:
+        # Fall back to single-point ratio
+        probe, rho_in = pairs[0]
+        ratio = rho_in / probe
+        result = abs_target * ratio
+    else:
+        probes = [p for p, _ in pairs]
+        rho_ins = [r for _, r in pairs]
+        result = _interp_with_extrapolation(abs_target, probes, rho_ins)
+
+    return float(np.clip(sign * result, -0.999, 0.999))
+
+
 def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
-                  all_distinct=False, n_cal=300, seed=99, freq_dict=None):
+                  all_distinct=False, n_cal=300, seed=99, freq_dict=None,
+                  calibration_mode="multipoint"):
     """Find the input mixing parameter that produces E[Spearman] = rho_target.
 
     Uses bisection on a fixed probe rho (0.30) to compute a rho-independent
@@ -298,6 +418,9 @@ def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
         Custom frequency dictionary.  When provided, must contain
         freq_dict[n][n_distinct]["custom"] = list of counts.
         Used instead of FREQ_DICT when distribution_type is "custom".
+    calibration_mode : str
+        "multipoint" (default) probes at 3 rho values and interpolates;
+        "single" uses one probe at 0.30 and a linear ratio.
 
     Returns
     -------
@@ -307,6 +430,13 @@ def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
     if abs(rho_target) < 1e-12:
         return 0.0
 
+    if calibration_mode == "multipoint":
+        return _calibrate_rho_multipoint(
+            n, n_distinct, distribution_type, rho_target, y_params,
+            all_distinct=all_distinct, n_cal=n_cal, seed=seed,
+            freq_dict=freq_dict)
+
+    # --- existing single-point code below (unchanged) ---
     cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal)
     if freq_dict is not None:
         counts = tuple(freq_dict[n][n_distinct]["custom"])

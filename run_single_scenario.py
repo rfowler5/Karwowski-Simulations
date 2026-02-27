@@ -50,7 +50,8 @@ if _pre_args.no_numba:
 import numpy as np
 from scipy.stats import spearmanr
 
-from config import CASES, N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER, ASYMPTOTIC_TIE_CORRECTION_MODE
+from config import (CASES, N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER,
+                    ASYMPTOTIC_TIE_CORRECTION_MODE, CALIBRATION_MODE)
 from data_generator import generate_cumulative_aluminum, get_generator
 from power_simulation import estimate_power, min_detectable_rho, _search_directions
 from confidence_interval_calculator import bootstrap_ci_averaged, _asymptotic_ci_results
@@ -59,7 +60,8 @@ from power_asymptotic import (asymptotic_results, get_x_counts,
 
 
 def run_power(case_id, n_distinct, dist_type, generators, n_sims, seed,
-              all_distinct=False, freq_dict=None, x_counts=None):
+              all_distinct=False, freq_dict=None, x_counts=None,
+              calibration_mode=None):
     """Run min-detectable-rho for a single scenario."""
     case = CASES[case_id]
     n = case["n"]
@@ -77,7 +79,7 @@ def run_power(case_id, n_distinct, dist_type, generators, n_sims, seed,
                 dist_type if not all_distinct else None,
                 y_params, generator=gen, n_sims=n_sims,
                 all_distinct=all_distinct, direction=d, seed=seed,
-                freq_dict=freq_dict)
+                freq_dict=freq_dict, calibration_mode=calibration_mode)
             elapsed = time.time() - t0
             results.append({
                 "method": gen,
@@ -106,7 +108,7 @@ def run_power(case_id, n_distinct, dist_type, generators, n_sims, seed,
 
 def run_ci(case_id, n_distinct, dist_type, generators, n_reps, n_boot,
            seed, all_distinct=False, tie_correction_mode=None,
-           freq_dict=None, x_counts=None):
+           freq_dict=None, x_counts=None, calibration_mode=None):
     """Run CI analysis for a single scenario."""
     if tie_correction_mode is None:
         tie_correction_mode = ASYMPTOTIC_TIE_CORRECTION_MODE
@@ -126,7 +128,7 @@ def run_ci(case_id, n_distinct, dist_type, generators, n_reps, n_boot,
             dist_type if not all_distinct else None,
             rho_obs, y_params, generator=gen, n_reps=n_reps,
             n_boot=n_boot, all_distinct=all_distinct, seed=seed,
-            freq_dict=freq_dict)
+            freq_dict=freq_dict, calibration_mode=calibration_mode)
         elapsed = time.time() - t0
         results.append({
             "method": f"bootstrap_{gen}",
@@ -186,7 +188,8 @@ def _parse_list(s, cast=str):
 def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
          n_sims=500, n_boot=500, n_reps=20, seed=42, power_only=False,
          ci_only=False, skip_copula=False, skip_linear=False,
-         skip_nonparametric=False, verbose=True, use_numba=None):
+         skip_nonparametric=False, verbose=True, use_numba=None,
+         calibration_mode=None):
     """Run power and/or CI for a single scenario.  Callable without CLI.
 
     Parameters
@@ -217,6 +220,8 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
     """
     if use_numba is not None:
         config.USE_NUMBA = use_numba
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
     case_data = CASES[case]
     n = case_data["n"]
 
@@ -265,13 +270,13 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
         power_res = run_power(
             case, n_distinct, dist_type, generators, n_sims, seed,
             all_distinct=all_distinct, freq_dict=custom_freq_dict,
-            x_counts=custom_x_counts)
+            x_counts=custom_x_counts, calibration_mode=calibration_mode)
 
     if not power_only:
         ci_res = run_ci(
             case, n_distinct, dist_type, generators, n_reps, n_boot, seed,
             all_distinct=all_distinct, freq_dict=custom_freq_dict,
-            x_counts=custom_x_counts)
+            x_counts=custom_x_counts, calibration_mode=calibration_mode)
 
     if verbose:
         print_results(desc, power_res, ci_res)
@@ -304,6 +309,10 @@ if __name__ == "__main__":
                         help="Run power analysis only")
     parser.add_argument("--ci-only", action="store_true",
                         help="Run CI analysis only")
+    parser.add_argument("--calibration-mode",
+                        choices=["multipoint", "single"],
+                        default=None,
+                        help="Calibration mode (default: multipoint)")
     parser.add_argument("--skip-copula", action="store_true")
     parser.add_argument("--skip-linear", action="store_true")
     parser.add_argument("--skip-nonparametric", action="store_true")
@@ -323,4 +332,5 @@ if __name__ == "__main__":
          n_boot=args.n_boot, n_reps=args.n_reps, seed=args.seed,
          power_only=args.power_only, ci_only=args.ci_only,
          skip_copula=args.skip_copula, skip_linear=args.skip_linear,
-         skip_nonparametric=args.skip_nonparametric, use_numba=_use)
+         skip_nonparametric=args.skip_nonparametric, use_numba=_use,
+         calibration_mode=args.calibration_mode)

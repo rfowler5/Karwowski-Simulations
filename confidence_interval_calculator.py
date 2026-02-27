@@ -43,7 +43,8 @@ from scipy.stats import spearmanr
 from joblib import Parallel, delayed
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
-                    N_BOOTSTRAP, ALPHA, ASYMPTOTIC_TIE_CORRECTION_MODE)
+                    N_BOOTSTRAP, ALPHA, ASYMPTOTIC_TIE_CORRECTION_MODE,
+                    CALIBRATION_MODE)
 from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             generate_y_linear, generate_y_nonparametric,
                             get_generator, calibrate_rho, calibrate_rho_copula,
@@ -144,7 +145,7 @@ def bootstrap_ci_simulated(n, n_distinct, distribution_type, rho_s, y_params,
 def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                            generator="copula", n_reps=200, n_boot=None,
                            alpha=None, all_distinct=False, seed=None,
-                           freq_dict=None):
+                           freq_dict=None, calibration_mode=None):
     """Average bootstrap CI endpoints over *n_reps* independent datasets.
 
     This is the correct approach when working with simulated (not observed)
@@ -172,6 +173,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         n_boot = N_BOOTSTRAP
     if alpha is None:
         alpha = ALPHA
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
 
     # Use separate RNG streams for data generation and bootstrap resampling so
     # that the n_reps datasets are identical regardless of n_boot.  A shared
@@ -201,7 +204,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
     if generator == "nonparametric":
         cal_rho = calibrate_rho(
             n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict)
+            all_distinct=all_distinct, freq_dict=freq_dict,
+            calibration_mode=calibration_mode)
     elif generator == "copula":
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
@@ -242,7 +246,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
 # ---------------------------------------------------------------------------
 
 def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
-                     n_reps, n_boot, alpha, tie_correction_mode, seed):
+                     n_reps, n_boot, alpha, tie_correction_mode, seed,
+                     calibration_mode=None):
     """Run bootstrap CI + asymptotic CI for a single scenario."""
     n = case["n"]
     rho_obs = case["observed_rho"]
@@ -254,7 +259,8 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
     boot = bootstrap_ci_averaged(
         n, k, dt, rho_obs, y_params,
         generator=generator, n_reps=n_reps, n_boot=n_boot,
-        alpha=alpha, all_distinct=all_distinct, seed=seed)
+        alpha=alpha, all_distinct=all_distinct, seed=seed,
+        calibration_mode=calibration_mode)
 
     asym = _asymptotic_ci_results(
         rho_obs, n, alpha, x_counts, tie_correction_mode)
@@ -278,7 +284,7 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
 
 def run_all_ci_scenarios(generator="copula", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
-                         n_jobs=1):
+                         n_jobs=1, calibration_mode=None):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.
 
     Uses bootstrap_ci_averaged (n_reps independent datasets, each
@@ -309,13 +315,15 @@ def run_all_ci_scenarios(generator="copula", n_reps=200, n_boot=None,
                 sc_seed = (seed + scenario_idx) if seed is not None else None
                 scenarios.append((case_id, case, k, dt, False,
                                   generator, n_reps, n_boot, alpha,
-                                  tie_correction_mode, sc_seed))
+                                  tie_correction_mode, sc_seed,
+                                  calibration_mode))
                 scenario_idx += 1
 
         sc_seed = (seed + scenario_idx) if seed is not None else None
         scenarios.append((case_id, case, n, None, True,
                           generator, n_reps, n_boot, alpha,
-                          tie_correction_mode, sc_seed))
+                          tie_correction_mode, sc_seed,
+                          calibration_mode))
         scenario_idx += 1
 
     if n_jobs == 1:

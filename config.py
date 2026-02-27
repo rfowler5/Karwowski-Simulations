@@ -246,4 +246,7 @@ POWER_SEARCH_DIRECTION = "needed_direction_only"
 # "with_tie_correction" (default), "without_tie_correction", or "both"
 ASYMPTOTIC_TIE_CORRECTION_MODE = "with_tie_correction"
 
+# "multipoint" (default, more accurate) or "single" (faster, ~3x less calibration cost)
+CALIBRATION_MODE = "multipoint"
+
 USE_NUMBA = True

@@ -23,7 +23,8 @@ import pandas as pd
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER,
-                    POWER_SEARCH_DIRECTION, ASYMPTOTIC_TIE_CORRECTION_MODE)
+                    POWER_SEARCH_DIRECTION, ASYMPTOTIC_TIE_CORRECTION_MODE,
+                    CALIBRATION_MODE)
 from power_simulation import run_all_scenarios as mc_scenarios
 from power_asymptotic import (asymptotic_results, get_x_counts)
 from confidence_interval_calculator import run_all_ci_scenarios
@@ -104,7 +105,7 @@ def _log(msg):
 def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
          tie_correction_mode=None, skip_linear=False, skip_copula=False,
          skip_nonparametric=False, cases=None, n_distinct_values=None,
-         dist_types=None, n_jobs=1, use_numba=None):
+         dist_types=None, n_jobs=1, use_numba=None, calibration_mode=None):
     if use_numba is not None:
         config.USE_NUMBA = use_numba
     if n_sims is None:
@@ -115,6 +116,8 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         n_reps = 200
     if tie_correction_mode is None:
         tie_correction_mode = ASYMPTOTIC_TIE_CORRECTION_MODE
+    if calibration_mode is None:
+        calibration_mode = CALIBRATION_MODE
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -134,7 +137,8 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         _log(f"Running {gen} Monte Carlo ({n_sims} sims per scenario)...")
         t0 = time.time()
         pw = mc_scenarios(generator=gen, n_sims=n_sims, seed=seed,
-                          n_jobs=n_jobs, **filter_kw)
+                          n_jobs=n_jobs, calibration_mode=calibration_mode,
+                          **filter_kw)
         _log(f"  {gen.title()} done in {time.time() - t0:.1f}s  "
              f"({len(pw)} scenarios)")
         all_power.extend(pw)
@@ -156,7 +160,7 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         ci = run_all_ci_scenarios(
             generator=gen, n_reps=n_reps, n_boot=n_boot,
             tie_correction_mode=tie_correction_mode, seed=seed,
-            n_jobs=n_jobs)
+            n_jobs=n_jobs, calibration_mode=calibration_mode)
         _log(f"  {gen.title()} CIs done in {time.time() - t0:.1f}s  "
              f"({len(ci)} scenarios)")
         all_ci.extend(ci)
@@ -219,6 +223,10 @@ if __name__ == "__main__":
     parser.add_argument("--n-jobs", type=int, default=1,
                         help="Parallel jobs for scenario-level parallelism "
                              "(1=sequential, -1=all cores, default: 1)")
+    parser.add_argument("--calibration-mode",
+                        choices=["multipoint", "single"],
+                        default=None,
+                        help="Calibration mode (default: multipoint)")
     parser.add_argument("--no-numba", action="store_true",
                         help="Disable Numba JIT (use pure NumPy fallback)")
     parser.add_argument("--numba", action="store_true",
@@ -238,4 +246,5 @@ if __name__ == "__main__":
          cases=_parse_int_list(args.cases) if args.cases else None,
          n_distinct_values=_parse_int_list(args.n_distinct) if args.n_distinct else None,
          dist_types=_parse_str_list(args.dist_types) if args.dist_types else None,
-         n_jobs=args.n_jobs, use_numba=_use)
+         n_jobs=args.n_jobs, use_numba=_use,
+         calibration_mode=args.calibration_mode)

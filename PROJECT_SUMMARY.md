@@ -28,16 +28,14 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 ### Calibration (nonparametric and copula)
 
 - Ties attenuate realised Spearman rho vs mixing weight (or input rho for copula).
-- Calibration computes a **rho-independent attenuation ratio** at probe rho=0.30 via bisection (300 samples).
-- Ratio cached per `(n, k, dist_type)` and reused for all rho values during bisection — avoids per-rho calibration (major speedup).
-- Cache key does NOT include `rho_target`.
+- **Multipoint (default)**: Probes at rho = 0.10, 0.30, 0.50; interpolates the calibration curve. Fixes nonlinear attenuation (0.01–0.03 bias that single-point can have). ~3× calibration cost (~9s vs ~3s per tie structure on first run); cached thereafter.
+- **Single-point** (`calibration_mode="single"`): Probes only at 0.30, applies constant ratio. Faster for exploratory runs.
+- Ratio/curve cached per `(n, k, dist_type)` and reused for all rho values during bisection — avoids per-rho calibration (major speedup).
 - **Nonparametric**: calibrates input mixing weight for `_raw_rank_mix`.
-- **Copula**: calibrates input rho_s for `generate_y_copula`; same rho-independent ratio approach.
-- Uses **symmetry** for negative rho_target: probes only at +0.30, applies same ratio to negative targets.
+- **Copula**: calibrates input rho_s for `generate_y_copula`; same rho-independent ratio approach (single-point only).
+- Uses **symmetry** for negative rho_target: probes only at positive values, applies sign to result.
 
 **Reference configuration**: seed=99, n_sims=4000, n_cal=700 achieves the floor (mean\|diff\| ≈ 0.002, max\|diff\| ≈ 0.003). Other seeds may not reach this accuracy.
-
-**Multi-point calibration (planned)**: For nonlinear attenuation, optional `calibration_mode="multipoint"` would probe at multiple rho values and use linear interpolation. See `plans/multipoint_calibration_plan.md`.
 
 ### Other implementation notes
 
@@ -51,7 +49,7 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 
 | Change | Impact |
 |--------|--------|
-| Rho-independent calibration ratio | ~20× (calibration once per tie structure, not per rho) |
+| Rho-independent calibration ratio | ~20× (calibration once per tie structure, not per rho). Multipoint: ~3× slower than single-point (~9s vs ~3s per structure) but more accurate. |
 | Vectorized Spearman (argsort-based ranking) | ~3.5× for CI (single scenario: ~42s → ~12s) |
 | Scenario-level parallelization (`n_jobs`) | ~2× additional (full grid CI: ~16 min → ~8 min with 4 logical cores) |
 | **Numba JIT** (ranking + bootstrap loops) | ~3× for CI, ~2× for power (with inner-thread parallelism via `prange`) |
@@ -69,7 +67,7 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 
 | File | Role |
 |------|------|
-| `config.py` | CASES, FREQ_DICT, N_SIMS, ALPHA, TARGET_POWER, `USE_NUMBA=True` (Numba control) |
+| `config.py` | CASES, FREQ_DICT, N_SIMS, ALPHA, TARGET_POWER, `CALIBRATION_MODE` (multipoint/single), `USE_NUMBA=True` (Numba control) |
 | `data_generator.py` | X generation, Y generators (copula, linear, nonparametric), `calibrate_rho`, `calibrate_rho_copula`, `_raw_rank_mix`, `_fit_lognormal` |
 | `power_simulation.py` | `estimate_power`, `min_detectable_rho`, `run_all_scenarios`; uses `spearman_rho_pvalue_2d` (vectorized) |
 | `power_asymptotic.py` | Non-central t power, Fisher z CI, tie correction (FHP), `get_x_counts` |
@@ -126,6 +124,7 @@ python run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
 # Accuracy test
 python test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 # Reference config (calibration seed 99, floor): --n-sims 4000 --n-cal 700 --generators nonparametric
+# Calibration mode: --calibration-mode multipoint (default) or --calibration-mode single
 
 # Warm up Numba cache (recommended before large runs)
 python warm_up_numba.py
@@ -135,4 +134,4 @@ python warm_up_numba.py
 
 ---
 
-*Last updated: 2026-02-26*
+*Last updated: 2026-02-27*
