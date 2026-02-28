@@ -214,5 +214,8 @@ TestSymmetryPower/
 # Sources
 .sources*/
 
+# Data (digitized values)
+data/
+
 # Old plans
 plans/archive*/

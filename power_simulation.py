@@ -23,6 +23,8 @@ Typical runtimes (nonparametric generator):
   - Copula now uses calibration; linear has no calibration overhead
 """
 
+import warnings
+
 import numpy as np
 from joblib import Parallel, delayed
 
@@ -32,6 +34,9 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     VECTORIZE_DATA_GENERATION)
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
+                            calibrate_rho_empirical, digitized_available,
+                            generate_y_empirical, generate_y_empirical_batch,
+                            get_pool,
                             generate_y_nonparametric, _fit_lognormal,
                             generate_cumulative_aluminum_batch,
                             generate_y_nonparametric_batch,
@@ -68,6 +73,15 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     if vectorize is None:
         vectorize = VECTORIZE_DATA_GENERATION
 
+    if generator == "empirical" and not digitized_available():
+        warnings.warn(
+            "Digitized data not available (data/digitized.py missing or failed to import). "
+            "Falling back to nonparametric generator.",
+            UserWarning,
+            stacklevel=2,
+        )
+        generator = "nonparametric"
+
     gen_fn = get_generator(generator)
     rng = np.random.default_rng(seed)
 
@@ -82,6 +96,12 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict)
+    elif generator == "empirical":
+        pool = get_pool(n)
+        cal_rho = calibrate_rho_empirical(
+            n, n_distinct, distribution_type, rho_s, pool,
+            all_distinct=all_distinct, freq_dict=freq_dict,
+            calibration_mode=calibration_mode)
 
     if vectorize:
         x_all = generate_cumulative_aluminum_batch(
@@ -94,6 +114,10 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
             y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=rng)
+        elif generator == "empirical":
+            y_all = generate_y_empirical_batch(
+                x_all, rho_s, y_params, rng=rng,
+                _calibrated_rho=cal_rho, pool=pool)
         else:
             y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=rng)
     else:
@@ -110,6 +134,9 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
             elif generator == "copula":
                 rho_in = cal_rho if cal_rho is not None else rho_s
                 yi = gen_fn(xi, rho_in, y_params, rng=rng)
+            elif generator == "empirical":
+                yi = generate_y_empirical(xi, rho_s, y_params, rng=rng,
+                                          _calibrated_rho=cal_rho)
             else:
                 yi = gen_fn(xi, rho_s, y_params, rng=rng)
             x_all[i] = xi

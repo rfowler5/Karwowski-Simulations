@@ -44,7 +44,7 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 - An additional all-distinct baseline (no ties) is computed for each case.
 - Total: 84 tied scenarios + 4 all-distinct = 88 scenarios per method.
 
-## Three Analysis Methods
+## Four Monte Carlo Methods (plus Asymptotic)
 
 ### Non-parametric rank-mixing (recommended)
 
@@ -105,9 +105,24 @@ Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for
 
 Generates `y = a + b*x + noise` on a log scale, calibrated so that the Pearson correlation of ranks approximates the target Spearman rho. This is a parametric model -- useful as a complement to the non-parametric method, but approximate because it assumes a linear log-scale relationship.
 
+### Empirical (Karwowski digitized data)
+
+Uses rank-mixing with **resampling from digitized Karwowski data pools** instead of a log-normal y-marginal. The pools are built from 71 paired (H-Al, B-Al) points digitized from the Karwowski scatterplot, with case and outlier inclusion inferred from sample size *n*:
+
+- **n=73** → B-Al, outliers excluded (71 digitized + 2 resampled)
+- **n=80** → B-Al, full sample (73 clean + 7 outliers)
+- **n=81** → H-Al, outliers excluded (71 digitized + 10 resampled)
+- **n=82** → H-Al, full sample (81 clean + 1 outlier)
+
+Requires `data/digitized.py` (see [Digitized data](#digitized-data) below). Use `--skip-empirical` to exclude this method when digitized data is unavailable. Calibration uses the same multipoint/single-point logic as nonparametric, with separate caches.
+
 ### Asymptotic
 
 Closed-form formulas (no simulation). Power uses the non-central t-distribution with df = n-2; CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)). Ties are handled via the Fieller-Hartley-Pearson variance correction throughout (see [Tie correction](#tie-correction-fieller-hartley-pearson) below). Fast and stable, serves as a cross-check against the Monte Carlo methods.
+
+## Digitized data (for empirical generator)
+
+The **empirical** generator resamples from digitized H-Al and B-Al values from the Karwowski scatterplot. The values in `data/digitized.py` were obtained using [WebPlotDigitizer v4](https://automeris.io/WebPlotDigitizer/). To use the empirical generator yourself, create `data/digitized.py` with arrays `H_AL71`, `B_AL71`, `H_AL_OUTLIER`, `B_AL_OUTLIER_MIN`, `B_AL_OUTLIER_MAX` (see the module docstring in `data_generator.py` for details). If `data/digitized.py` is missing or fails to import, a warning is emitted: when only empirical was selected it falls back to nonparametric; when multiple generators were selected empirical is skipped. Use `--skip-empirical` to avoid the warning when you do not have digitized data.
 
 ## Installation
 
@@ -174,8 +189,9 @@ python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center -
 ### Skip specific methods
 
 ```bash
-python run_simulation.py --skip-linear --skip-copula   # nonparametric + asymptotic only
-python run_simulation.py --skip-nonparametric           # copula + linear + asymptotic
+python run_simulation.py --skip-linear --skip-copula   # nonparametric + empirical + asymptotic
+python run_simulation.py --skip-nonparametric           # copula + linear + empirical + asymptotic
+python run_simulation.py --skip-empirical                # omit empirical (e.g. when digitized data unavailable)
 ```
 
 ### Calibration mode (nonparametric only)
@@ -199,8 +215,8 @@ Run power and/or CI for a specific (case, k, distribution) combination:
 # Power + CI for Case 3, k=4, heavy_center
 python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500
 
-# Power only, skip copula and linear
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --power-only --skip-copula --skip-linear
+# Power only, skip copula, linear, and empirical
+python run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --power-only --skip-copula --skip-linear --skip-empirical
 
 # CI only for all-distinct baseline
 python run_single_scenario.py --case 1 --all-distinct --ci-only --n-reps 20 --n-boot 500
@@ -230,8 +246,10 @@ python test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 # Full sweep, all generators
 python test_simulation_accuracy.py --n-sims 200
 
-# Specific generators only
+# Specific generators only (empirical requires digitized data)
 python test_simulation_accuracy.py --generators nonparametric,copula --n-sims 100
+
+python test_simulation_accuracy.py --generators empirical --case 3 --n-sims 100
 
 # Custom frequency distribution (requires --case; counts must sum to case's n)
 python test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
@@ -403,7 +421,7 @@ Copula and linear generators have similar per-sim cost but no calibration overhe
 - Bootstrap CIs dominate total runtime when using many reps and resamples. With `--n-reps 200`, use `--n-boot 500` (bootstrap noise is negligible). With `--n-reps 1600` or higher, `--n-boot 200`–`400` suffices; `--n-boot 500` is comfortable. Use `--n-reps 20 --n-boot 500` for quick checks.
 - Use `run_single_scenario.py` to test individual scenarios quickly before committing to a full run.
 - Filter scenarios with `--cases`, `--n-distinct`, `--dist-types` to reduce the grid.
-- Use `--skip-copula --skip-linear` to run only the recommended nonparametric + asymptotic methods.
+- Use `--skip-copula --skip-linear` to run only the recommended nonparametric + empirical + asymptotic methods. Use `--skip-empirical` when digitized data is unavailable.
 
 ## Benchmark scripts
 
@@ -450,7 +468,7 @@ python run_simulation.py --n-sims 10000 --skip-copula --skip-linear --n-jobs -1 
 python -c '
 import time, pickle
 from confidence_interval_calculator import run_all_ci_scenarios
-for gen in ["nonparametric", "copula", "linear"]:
+for gen in ["nonparametric", "copula", "linear", "empirical"]:
     t0 = time.time()
     print(f"Starting {gen}...")
     res = run_all_ci_scenarios(generator=gen, n_reps=7400, n_boot=500, n_jobs=-1, seed=42)

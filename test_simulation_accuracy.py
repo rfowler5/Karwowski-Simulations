@@ -42,7 +42,8 @@ from scipy.stats import spearmanr
 from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES, CALIBRATION_MODE
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
-                            generate_y_nonparametric, _fit_lognormal)
+                            calibrate_rho_empirical, generate_y_empirical,
+                            get_pool, generate_y_nonparametric, _fit_lognormal)
 
 
 DEFAULT_RHO_TARGETS = [0.30, -0.30]
@@ -81,6 +82,12 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_target, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal)
+    elif generator == "empirical":
+        pool = get_pool(n)
+        cal_rho = calibrate_rho_empirical(
+            n, n_distinct, distribution_type, rho_target, pool,
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+            calibration_mode=calibration_mode)
 
     for i in range(n_sims):
         x = generate_cumulative_aluminum(
@@ -93,6 +100,9 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_target
             y = gen_fn(x, rho_in, y_params, rng=rng)
+        elif generator == "empirical":
+            y = generate_y_empirical(x, rho_target, y_params, rng=rng,
+                                      _calibrated_rho=cal_rho)
         else:
             y = gen_fn(x, rho_target, y_params, rng=rng)
         rhos[i], _ = spearmanr(x, y)

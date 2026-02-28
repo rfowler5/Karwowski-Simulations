@@ -49,8 +49,11 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     CALIBRATION_MODE, VECTORIZE_DATA_GENERATION,
                     BATCH_CI_BOOTSTRAP)
 from data_generator import (generate_cumulative_aluminum, generate_y_copula,
-                            generate_y_linear, generate_y_nonparametric,
-                            get_generator, calibrate_rho, calibrate_rho_copula,
+                            digitized_available, generate_y_empirical,
+                            generate_y_empirical_batch, generate_y_linear,
+                            generate_y_nonparametric, get_generator,
+                            calibrate_rho, calibrate_rho_copula,
+                            calibrate_rho_empirical, get_pool,
                             _fit_lognormal,
                             generate_cumulative_aluminum_batch,
                             generate_y_nonparametric_batch,
@@ -114,7 +117,7 @@ def bootstrap_ci_single(x, y, rho_obs, n_boot=None, alpha=None, rng=None):
 # ---------------------------------------------------------------------------
 
 def bootstrap_ci_simulated(n, n_distinct, distribution_type, rho_s, y_params,
-                            generator="copula", n_boot=None, alpha=None,
+                            generator="nonparametric", n_boot=None, alpha=None,
                             all_distinct=False, seed=None):
     """Generate one (x, y) dataset and compute a bootstrap CI.
 
@@ -138,8 +141,24 @@ def bootstrap_ci_simulated(n, n_distinct, distribution_type, rho_s, y_params,
         n, n_distinct, distribution_type=distribution_type,
         all_distinct=all_distinct, rng=rng)
 
-    gen_fn = get_generator(generator)
-    y = gen_fn(x, rho_s, y_params, rng=rng)
+    if generator == "empirical" and not digitized_available():
+        warnings.warn(
+            "Digitized data not available (data/digitized.py missing or failed to import). "
+            "Falling back to nonparametric generator.",
+            UserWarning,
+            stacklevel=2,
+        )
+        generator = "nonparametric"
+
+    if generator == "empirical":
+        pool = get_pool(n)
+        cal_rho = calibrate_rho_empirical(n, n_distinct, distribution_type,
+                                          rho_s, pool, all_distinct=all_distinct)
+        y = generate_y_empirical(x, rho_s, y_params, rng=rng,
+                                  _calibrated_rho=cal_rho)
+    else:
+        gen_fn = get_generator(generator)
+        y = gen_fn(x, rho_s, y_params, rng=rng)
 
     rho_hat, _ = spearmanr(x, y)
     lo, hi = bootstrap_ci_single(x, y, rho_hat, n_boot=n_boot,
@@ -152,7 +171,7 @@ def bootstrap_ci_simulated(n, n_distinct, distribution_type, rho_s, y_params,
 # ---------------------------------------------------------------------------
 
 def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
-                           generator="copula", n_reps=200, n_boot=None,
+                           generator="nonparametric", n_reps=200, n_boot=None,
                            alpha=None, all_distinct=False, seed=None,
                            freq_dict=None, calibration_mode=None, vectorize=None,
                            batch_bootstrap=None):
@@ -189,6 +208,15 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         vectorize = VECTORIZE_DATA_GENERATION
     if batch_bootstrap is None:
         batch_bootstrap = BATCH_CI_BOOTSTRAP
+
+    if generator == "empirical" and not digitized_available():
+        warnings.warn(
+            "Digitized data not available (data/digitized.py missing or failed to import). "
+            "Falling back to nonparametric generator.",
+            UserWarning,
+            stacklevel=2,
+        )
+        generator = "nonparametric"
 
     if batch_bootstrap and not vectorize:
         warnings.warn(
@@ -232,6 +260,12 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict)
+    elif generator == "empirical":
+        pool = get_pool(n)
+        cal_rho = calibrate_rho_empirical(
+            n, n_distinct, distribution_type, rho_s, pool,
+            all_distinct=all_distinct, freq_dict=freq_dict,
+            calibration_mode=calibration_mode)
 
     if batch_bootstrap and vectorize:
         # --- NEW BATCH PATH ---
@@ -247,6 +281,10 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
             y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=data_rng)
+        elif generator == "empirical":
+            y_all = generate_y_empirical_batch(
+                x_all, rho_s, y_params, rng=data_rng,
+                _calibrated_rho=cal_rho, pool=pool)
         else:
             y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng)
 
@@ -284,6 +322,10 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
             y_reps = generate_y_copula_batch(x_reps, rho_in, y_params, rng=data_rng)
+        elif generator == "empirical":
+            y_reps = generate_y_empirical_batch(
+                x_reps, rho_s, y_params, rng=data_rng,
+                _calibrated_rho=cal_rho, pool=pool)
         else:
             y_reps = generate_y_linear_batch(x_reps, rho_s, y_params, rng=data_rng)
 
@@ -296,7 +338,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
             uppers[rep] = hi
             rho_hats[rep] = rho_hat
     else:
-        gen_fn = get_generator(generator) if generator not in ("nonparametric",) else None
+        gen_fn = get_generator(generator) if generator not in ("nonparametric", "empirical") else None
         for rep in range(n_reps):
             x = generate_cumulative_aluminum(
                 n, n_distinct, distribution_type=distribution_type,
@@ -308,6 +350,9 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
             elif generator == "copula":
                 rho_in = cal_rho if cal_rho is not None else rho_s
                 y = gen_fn(x, rho_in, y_params, rng=data_rng)
+            elif generator == "empirical":
+                y = generate_y_empirical(x, rho_s, y_params, rng=data_rng,
+                                         _calibrated_rho=cal_rho)
             else:
                 y = gen_fn(x, rho_s, y_params, rng=data_rng)
             rho_hat = _fast_spearman_rho(x, y)
@@ -367,7 +412,7 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
     }
 
 
-def run_all_ci_scenarios(generator="copula", n_reps=200, n_boot=None,
+def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
                          n_jobs=1, calibration_mode=None, batch_bootstrap=None):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.

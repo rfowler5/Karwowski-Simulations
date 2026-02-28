@@ -37,6 +37,7 @@ Skip specific methods:
 
 import argparse
 import time
+import warnings
 
 import config
 
@@ -52,7 +53,7 @@ from scipy.stats import spearmanr
 
 from config import (CASES, N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER,
                     ASYMPTOTIC_TIE_CORRECTION_MODE, CALIBRATION_MODE)
-from data_generator import generate_cumulative_aluminum, get_generator
+from data_generator import generate_cumulative_aluminum, get_generator, digitized_available
 from power_simulation import estimate_power, min_detectable_rho, _search_directions
 from confidence_interval_calculator import bootstrap_ci_averaged, _asymptotic_ci_results
 from power_asymptotic import (asymptotic_results, get_x_counts,
@@ -188,8 +189,8 @@ def _parse_list(s, cast=str):
 def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
          n_sims=500, n_boot=500, n_reps=20, seed=42, power_only=False,
          ci_only=False, skip_copula=False, skip_linear=False,
-         skip_nonparametric=False, verbose=True, use_numba=None,
-         calibration_mode=None):
+         skip_nonparametric=False, skip_empirical=False, verbose=True,
+         use_numba=None, calibration_mode=None):
     """Run power and/or CI for a single scenario.  Callable without CLI.
 
     Parameters
@@ -251,8 +252,22 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
         generators.append("copula")
     if not skip_linear:
         generators.append("linear")
+    if not skip_empirical:
+        generators.append("empirical")
     if not generators:
         generators = ["nonparametric"]
+
+    if "empirical" in generators and not digitized_available():
+        warnings.warn(
+            "Digitized data not available (data/digitized.py missing or failed to import). "
+            "Empirical generator unavailable; using fallback.",
+            UserWarning,
+            stacklevel=2,
+        )
+        if len(generators) == 1:
+            generators = ["nonparametric"]
+        else:
+            generators = [g for g in generators if g != "empirical"]
 
     if all_distinct:
         desc = f"Case {case} ({case_data['label']}), N={n}, all distinct"
@@ -316,6 +331,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-copula", action="store_true")
     parser.add_argument("--skip-linear", action="store_true")
     parser.add_argument("--skip-nonparametric", action="store_true")
+    parser.add_argument("--skip-empirical", action="store_true")
     parser.add_argument("--no-numba", action="store_true",
                         help="Disable Numba JIT (use pure NumPy fallback)")
     parser.add_argument("--numba", action="store_true",
@@ -332,5 +348,6 @@ if __name__ == "__main__":
          n_boot=args.n_boot, n_reps=args.n_reps, seed=args.seed,
          power_only=args.power_only, ci_only=args.ci_only,
          skip_copula=args.skip_copula, skip_linear=args.skip_linear,
-         skip_nonparametric=args.skip_nonparametric, use_numba=_use,
+         skip_nonparametric=args.skip_nonparametric,
+         skip_empirical=args.skip_empirical, use_numba=_use,
          calibration_mode=args.calibration_mode)

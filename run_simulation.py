@@ -9,6 +9,7 @@ import os
 import sys
 import time
 import argparse
+import warnings
 
 import config
 
@@ -28,6 +29,7 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
 from power_simulation import run_all_scenarios as mc_scenarios
 from power_asymptotic import (asymptotic_results, get_x_counts)
 from confidence_interval_calculator import run_all_ci_scenarios
+from data_generator import digitized_available
 from table_outputs import (build_min_detectable_table, save_min_detectable_table,
                            build_ci_table, save_ci_table,
                            build_all_distinct_table, save_all_distinct_table,
@@ -104,8 +106,9 @@ def _log(msg):
 
 def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
          tie_correction_mode=None, skip_linear=False, skip_copula=False,
-         skip_nonparametric=False, cases=None, n_distinct_values=None,
-         dist_types=None, n_jobs=1, use_numba=None, calibration_mode=None):
+         skip_nonparametric=False, skip_empirical=False, cases=None,
+         n_distinct_values=None, dist_types=None, n_jobs=1, use_numba=None,
+         calibration_mode=None):
     if use_numba is not None:
         config.USE_NUMBA = use_numba
     if n_sims is None:
@@ -132,6 +135,20 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         mc_methods.append("copula")
     if not skip_linear:
         mc_methods.append("linear")
+    if not skip_empirical:
+        mc_methods.append("empirical")
+
+    if "empirical" in mc_methods and not digitized_available():
+        warnings.warn(
+            "Digitized data not available (data/digitized.py missing or failed to import). "
+            "Empirical generator unavailable; using fallback.",
+            UserWarning,
+            stacklevel=2,
+        )
+        if len(mc_methods) == 1:
+            mc_methods = ["nonparametric"]
+        else:
+            mc_methods = [g for g in mc_methods if g != "empirical"]
 
     for gen in mc_methods:
         _log(f"Running {gen} Monte Carlo ({n_sims} sims per scenario)...")
@@ -210,6 +227,8 @@ if __name__ == "__main__":
                         help="Skip copula Monte Carlo")
     parser.add_argument("--skip-nonparametric", action="store_true",
                         help="Skip nonparametric Monte Carlo")
+    parser.add_argument("--skip-empirical", action="store_true",
+                        help="Skip empirical Monte Carlo")
     parser.add_argument("--n-boot", type=int, default=None,
                         help=f"Bootstrap resamples per dataset (default: {N_BOOTSTRAP})")
     parser.add_argument("--n-reps", type=int, default=None,
@@ -243,6 +262,7 @@ if __name__ == "__main__":
          tie_correction_mode=args.tie_correction,
          skip_linear=args.skip_linear, skip_copula=args.skip_copula,
          skip_nonparametric=args.skip_nonparametric,
+         skip_empirical=args.skip_empirical,
          cases=_parse_int_list(args.cases) if args.cases else None,
          n_distinct_values=_parse_int_list(args.n_distinct) if args.n_distinct else None,
          dist_types=_parse_str_list(args.dist_types) if args.dist_types else None,

@@ -32,10 +32,23 @@ from scipy.stats import norm, rankdata
 from config import X_PARAMS, FREQ_DICT
 from spearman_helpers import _rank_rows
 
+try:
+    from data.digitized import H_AL71, B_AL71, H_AL_OUTLIER, B_AL_OUTLIER_MIN, B_AL_OUTLIER_MAX
+    _DIGITIZED_AVAILABLE = True
+except ImportError:
+    _DIGITIZED_AVAILABLE = False
+    H_AL71 = B_AL71 = H_AL_OUTLIER = B_AL_OUTLIER_MIN = B_AL_OUTLIER_MAX = None
+
+
+def digitized_available():
+    """Return True if data/digitized.py was imported successfully (empirical generator can be used)."""
+    return _DIGITIZED_AVAILABLE
+
 GENERATORS = {
     "copula": "generate_y_copula",
     "linear": "generate_y_linear",
     "nonparametric": "generate_y_nonparametric",
+    "empirical": "generate_y_empirical",
 }
 
 _NORM_PPF_075 = float(norm.ppf(0.75))
@@ -48,6 +61,7 @@ def get_generator(name):
         "copula": generate_y_copula,
         "linear": generate_y_linear,
         "nonparametric": generate_y_nonparametric,
+        "empirical": generate_y_empirical,
     }
     if name not in funcs:
         raise ValueError(f"Unknown generator {name!r}; choose from {list(funcs)}")
@@ -111,6 +125,137 @@ def generate_cumulative_aluminum(n, n_distinct, distribution_type=None,
     x = template.copy()
     rng.shuffle(x)
     return x
+
+
+# ---------------------------------------------------------------------------
+# Y generation – Empirical
+# ---------------------------------------------------------------------------
+
+if _DIGITIZED_AVAILABLE:
+    known_b_al_outliers = np.array([B_AL_OUTLIER_MIN, B_AL_OUTLIER_MAX])
+else:
+    known_b_al_outliers = None
+
+
+def generate_b_al_outliers(n_missing=5, low=B_AL_OUTLIER_MIN if _DIGITIZED_AVAILABLE else 98.0,
+                            high=B_AL_OUTLIER_MAX if _DIGITIZED_AVAILABLE else 952.0, rng=None):
+    """
+    Sample remaining B-Al outliers using log-uniform distribution
+    (heavy-tailed, realistic for extreme biomarker values).
+    """
+    if not _DIGITIZED_AVAILABLE:
+        raise ImportError(
+            "Digitized data not available. Create data/digitized.py or use --skip-empirical.")
+    if rng is None:
+        rng = np.random.default_rng()
+
+    log_low = np.log(low)
+    log_high = np.log(high)
+    sampled = np.exp(rng.uniform(log_low, log_high, n_missing))
+    return np.concatenate([known_b_al_outliers, sampled])
+
+def generate_empirical_y(n, exclude_outliers=True):
+    """
+    Generate Y values (H-Al and B-Al) by resampling from the 71 digitized points.
+    - exclude_outliers=True: use only the 71 core points (for n = 73 case)
+    - exclude_outliers=False: include the 7 B-Al outliers + 1 H-Al outlier (for n=80/82 cases)
+    """
+    if exclude_outliers:
+        # Resample from the 71 non-outlier points
+        idx = np.random.choice(len(H_AL71), size=n, replace=True)
+        h = H_AL71[idx]
+        b = B_AL71[idx]
+    else:
+        # Include outliers for full sample
+        outliers_b = generate_b_al_outliers(n_missing=5)  # 5 unknowns + 2 known = 7
+        full_h = np.append(H_AL71, H_AL_OUTLIER)
+        full_b = np.append(B_AL71, outliers_b)
+        idx = np.random.choice(len(full_h), size=n, replace=True)
+        h = full_h[idx]
+        b = full_b[idx]
+
+    return h, b
+
+
+# ---------------------------------------------------------------------------
+# Empirical pool construction
+# ---------------------------------------------------------------------------
+
+_POOL_CACHE = {}
+_POOL_SEED = 42
+
+
+def get_pool(n):
+    """Return the empirical Y pool for sample size *n*.
+
+    Requires digitized data (data/digitized.py). Use digitized_available() to check.
+    The pool has exactly *n* values, matching the Karwowski case:
+      n=73 -> B-Al clean  (71 digitized + 2 resampled)
+      n=80 -> B-Al full   (73 clean + 2 known outliers + 5 log-uniform outliers)
+      n=81 -> H-Al clean  (71 digitized + 10 resampled)
+      n=82 -> H-Al full   (81 clean + 1 known outlier)
+
+    Missing non-outlier values are filled by resampling with replacement
+    from the 71 known values.  Unknown B-Al outliers are log-uniform
+    between B_AL_OUTLIER_MIN and B_AL_OUTLIER_MAX.  All random generation
+    uses a fixed seed (_POOL_SEED=42) for reproducibility.      Results are
+    cached so the pool is identical across calls and runs.
+    """
+    if not _DIGITIZED_AVAILABLE:
+        raise ImportError(
+            "Digitized data not available. Create data/digitized.py or use --skip-empirical.")
+    if n in _POOL_CACHE:
+        return _POOL_CACHE[n]
+
+    rng = np.random.default_rng(_POOL_SEED)
+
+    if n == 73:
+        fill = rng.choice(B_AL71, size=2, replace=True)
+        pool = np.concatenate([B_AL71, fill])
+    elif n == 80:
+        base = get_pool(73)
+        outliers = generate_b_al_outliers(n_missing=5, rng=rng)
+        pool = np.concatenate([base, outliers])
+    elif n == 81:
+        fill = rng.choice(H_AL71, size=10, replace=True)
+        pool = np.concatenate([H_AL71, fill])
+    elif n == 82:
+        base = get_pool(81)
+        pool = np.append(base, H_AL_OUTLIER)
+    else:
+        raise ValueError(
+            f"Empirical generator only supports n in {{73, 80, 81, 82}}, got {n}")
+
+    _POOL_CACHE[n] = pool
+    return pool
+
+
+def generate_y_empirical(x, rho_s, y_params, rng=None, _calibrated_rho=None):
+    """Generate y via rank-mixing with empirical pool resampling.
+
+    Same rank-mixing logic as generate_y_nonparametric, but draws y-marginal
+    values from the empirical pool (via get_pool) instead of a lognormal.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    pool = get_pool(len(x))
+    rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
+    x_ranks = rankdata(x, method="average")
+    return _raw_rank_mix(x_ranks, rho_input, y_params, rng,
+                         marginal="empirical", pool=pool)
+
+
+def generate_y_empirical_batch(x_batch, rho_s, y_params, rng=None,
+                               _calibrated_rho=None, pool=None):
+    """Batch version of generate_y_empirical."""
+    if rng is None:
+        rng = np.random.default_rng()
+    if pool is None:
+        pool = get_pool(x_batch.shape[1])
+    rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
+    x_ranks_batch = _rank_rows(x_batch)
+    return _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
+                               marginal="empirical", pool=pool)
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +378,8 @@ def generate_y_linear(x, rho_s, y_params, rng=None):
 # Y generation – Non-parametric rank-mixing (recommended for tied x)
 # ---------------------------------------------------------------------------
 
-def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None):
+def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None,
+                  marginal="lognormal", pool=None):
     """Core rank-mixing: returns y with ranks correlated to x_ranks.
 
     Parameters
@@ -241,6 +387,10 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None):
     _ln_params : tuple or None
         Pre-computed (mu, sigma) from _fit_lognormal.  Avoids repeated
         lookups when called in tight loops.
+    marginal : str
+        "lognormal" (default) or "empirical".
+    pool : ndarray or None
+        Required when marginal="empirical".  Values to resample from.
     """
     n = len(x_ranks)
     noise_ranks = rng.permutation(n) + 1.0
@@ -256,11 +406,18 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None):
     rho_c = np.clip(rho_input, -0.999, 0.999)
     mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
 
-    if _ln_params is not None:
-        mu, sigma = _ln_params
+    if marginal == "lognormal":
+        if _ln_params is not None:
+            mu, sigma = _ln_params
+        else:
+            mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
+        y_values = rng.lognormal(mean=mu, sigma=sigma, size=n)
+    elif marginal == "empirical":
+        if pool is None:
+            raise ValueError("pool required for empirical marginal")
+        y_values = rng.choice(pool, size=n, replace=True)
     else:
-        mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
-    y_values = rng.lognormal(mean=mu, sigma=sigma, size=n)
+        raise ValueError(f"Unknown marginal: {marginal}")
     y_values.sort()
 
     y_final = np.empty(n)
@@ -571,6 +728,161 @@ def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
     return float(np.clip(result, -0.999, 0.999))
 
 
+# ---------------------------------------------------------------------------
+# Empirical calibration (same logic as nonparametric, but resamples from pool)
+# ---------------------------------------------------------------------------
+
+_CALIBRATION_CACHE_EMP = {}
+_CALIBRATION_CACHE_MULTIPOINT_EMP = {}
+
+
+def _mean_rho_empirical(rho_in, template, pool, n_cal, seed):
+    """Mean realised Spearman rho over n_cal samples using empirical pool."""
+    cal_rng = np.random.default_rng(seed)
+    total = 0.0
+    for _ in range(n_cal):
+        x = template.copy()
+        cal_rng.shuffle(x)
+        x_ranks = rankdata(x, method="average")
+        nn = len(x_ranks)
+        noise_ranks = cal_rng.permutation(nn) + 1.0
+
+        s_x = x_ranks - np.mean(x_ranks)
+        sd_x = np.std(x_ranks, ddof=0)
+        if sd_x > 0:
+            s_x /= sd_x
+        s_n = noise_ranks - np.mean(noise_ranks)
+        s_n /= np.std(noise_ranks, ddof=0)
+
+        rho_c = np.clip(rho_in, -0.999, 0.999)
+        mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
+
+        y_vals = cal_rng.choice(pool, size=nn, replace=True)
+        y_vals.sort()
+        y_final = np.empty(nn)
+        y_final[np.argsort(mixed)] = y_vals
+
+        total += _fast_spearman(x_ranks, y_final)
+    return total / n_cal
+
+
+def _bisect_for_probe_empirical(probe, template, pool, n_cal, seed,
+                                n_iter=25, tol=5e-5):
+    """Bisect to find rho_in such that _mean_rho_empirical(rho_in, ...) ~ probe."""
+    lo, hi = 0.0, min(probe * 2.0, 0.999)
+    if _mean_rho_empirical(hi, template, pool, n_cal, seed) < probe:
+        hi = 0.999
+    if _mean_rho_empirical(hi, template, pool, n_cal, seed) < probe:
+        return None
+
+    for _ in range(n_iter):
+        mid = (lo + hi) / 2.0
+        observed = _mean_rho_empirical(mid, template, pool, n_cal, seed)
+        if observed < probe:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+
+    return (lo + hi) / 2.0
+
+
+def _calibrate_rho_multipoint_empirical(n, n_distinct, distribution_type,
+                                        rho_target, pool, all_distinct=False,
+                                        n_cal=300, seed=99, freq_dict=None):
+    """Multi-point calibration for empirical marginal."""
+    cache_key = ("emp", n, n_distinct, distribution_type, all_distinct, n_cal,
+                 "multipoint")
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_MULTIPOINT_EMP:
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                   freq_dict, all_distinct)
+        pairs = []
+        for probe in _MULTIPOINT_PROBES:
+            rho_in = _bisect_for_probe_empirical(probe, template, pool,
+                                                 n_cal, seed)
+            if rho_in is not None:
+                pairs.append((probe, rho_in))
+
+        _CALIBRATION_CACHE_MULTIPOINT_EMP[cache_key] = pairs
+
+    pairs = sorted(_CALIBRATION_CACHE_MULTIPOINT_EMP[cache_key],
+                   key=lambda p: p[0])
+
+    if not pairs:
+        return float(np.clip(rho_target, -0.999, 0.999))
+
+    abs_target = abs(rho_target)
+    sign = 1.0 if rho_target >= 0 else -1.0
+
+    if len(pairs) == 1:
+        probe, rho_in = pairs[0]
+        ratio = rho_in / probe
+        result = abs_target * ratio
+    else:
+        probes = [p for p, _ in pairs]
+        rho_ins = [r for _, r in pairs]
+        result = _interp_with_extrapolation(abs_target, probes, rho_ins)
+
+    return float(np.clip(sign * result, -0.999, 0.999))
+
+
+def calibrate_rho_empirical(n, n_distinct, distribution_type, rho_target, pool,
+                            all_distinct=False, n_cal=300, seed=99,
+                            freq_dict=None, calibration_mode="multipoint"):
+    """Find input mixing parameter for empirical marginal.
+
+    Same structure as calibrate_rho but uses empirical pool instead of
+    lognormal y-marginal.  Separate caches (_CALIBRATION_CACHE_EMP,
+    _CALIBRATION_CACHE_MULTIPOINT_EMP) avoid collisions with the
+    nonparametric calibration.
+    """
+    if abs(rho_target) < 1e-12:
+        return 0.0
+
+    if calibration_mode == "multipoint":
+        return _calibrate_rho_multipoint_empirical(
+            n, n_distinct, distribution_type, rho_target, pool,
+            all_distinct=all_distinct, n_cal=n_cal, seed=seed,
+            freq_dict=freq_dict)
+
+    cache_key = ("emp", n, n_distinct, distribution_type, all_distinct, n_cal)
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_EMP:
+        probe = 0.30
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                   freq_dict, all_distinct)
+
+        lo, hi = 0.0, min(probe * 2.0, 0.999)
+        if _mean_rho_empirical(hi, template, pool, n_cal, seed) < probe:
+            hi = 0.999
+
+        for _ in range(25):
+            mid = (lo + hi) / 2.0
+            observed = _mean_rho_empirical(mid, template, pool, n_cal, seed)
+            if observed < probe:
+                lo = mid
+            else:
+                hi = mid
+            if hi - lo < 5e-5:
+                break
+
+        calibrated_probe = (lo + hi) / 2.0
+        ratio = calibrated_probe / probe if probe > 0 else 1.0
+        _CALIBRATION_CACHE_EMP[cache_key] = ratio
+
+    ratio = _CALIBRATION_CACHE_EMP[cache_key]
+    result = rho_target * ratio
+    return float(np.clip(result, -0.999, 0.999))
+
+
 def generate_y_nonparametric(x, rho_s, y_params, rng=None,
                              _calibrated_rho=None, _ln_params=None):
     """Generate y via calibrated rank-mixing to target Spearman *rho_s*.
@@ -622,7 +934,8 @@ def generate_cumulative_aluminum_batch(n_sims, n, n_distinct,
     return np.take_along_axis(x_batch, perm, axis=1)
 
 
-def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng, _ln_params=None):
+def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
+                        _ln_params=None, marginal="lognormal", pool=None):
     n_sims, n = x_ranks_batch.shape
 
     # Noise ranks: independent permutation per row (permuted in NumPy 1.20+; argsort fallback)
@@ -646,12 +959,18 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng, _ln_params=None
     rho_c = np.clip(rho_input, -0.999, 0.999)
     mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n   # (n_sims, n)
 
-    # Lognormal y-values — MUST use mu, sigma (not default 0, 1)
-    if _ln_params is not None:
-        mu, sigma = _ln_params
+    if marginal == "lognormal":
+        if _ln_params is not None:
+            mu, sigma = _ln_params
+        else:
+            mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
+        y_values = rng.lognormal(mean=mu, sigma=sigma, size=(n_sims, n))
+    elif marginal == "empirical":
+        if pool is None:
+            raise ValueError("pool required for empirical marginal")
+        y_values = rng.choice(pool, size=(n_sims, n), replace=True)
     else:
-        mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
-    y_values = rng.lognormal(mean=mu, sigma=sigma, size=(n_sims, n))
+        raise ValueError(f"Unknown marginal: {marginal}")
     y_values.sort(axis=1)
 
     # Assign: for each row, place sorted y_values at the argsort of mixed
