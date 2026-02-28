@@ -38,19 +38,28 @@ n_reps and second-decimal reliability:
   See README "Bootstrap CI" for details.
 """
 
+import warnings
+
 import numpy as np
 from scipy.stats import spearmanr
 from joblib import Parallel, delayed
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_BOOTSTRAP, ALPHA, ASYMPTOTIC_TIE_CORRECTION_MODE,
-                    CALIBRATION_MODE)
+                    CALIBRATION_MODE, VECTORIZE_DATA_GENERATION,
+                    BATCH_CI_BOOTSTRAP)
 from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             generate_y_linear, generate_y_nonparametric,
                             get_generator, calibrate_rho, calibrate_rho_copula,
-                            _fit_lognormal)
+                            _fit_lognormal,
+                            generate_cumulative_aluminum_batch,
+                            generate_y_nonparametric_batch,
+                            generate_y_copula_batch,
+                            generate_y_linear_batch)
 from power_asymptotic import asymptotic_ci, get_x_counts
-from spearman_helpers import spearman_rho_2d, _fast_spearman_rho, _bootstrap_rhos_jit, use_numba
+from spearman_helpers import (spearman_rho_2d, _fast_spearman_rho,
+                              _bootstrap_rhos_jit, _batch_bootstrap_rhos_jit,
+                              use_numba)
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +154,8 @@ def bootstrap_ci_simulated(n, n_distinct, distribution_type, rho_s, y_params,
 def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                            generator="copula", n_reps=200, n_boot=None,
                            alpha=None, all_distinct=False, seed=None,
-                           freq_dict=None, calibration_mode=None):
+                           freq_dict=None, calibration_mode=None, vectorize=None,
+                           batch_bootstrap=None):
     """Average bootstrap CI endpoints over *n_reps* independent datasets.
 
     This is the correct approach when working with simulated (not observed)
@@ -175,6 +185,18 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         alpha = ALPHA
     if calibration_mode is None:
         calibration_mode = CALIBRATION_MODE
+    if vectorize is None:
+        vectorize = VECTORIZE_DATA_GENERATION
+    if batch_bootstrap is None:
+        batch_bootstrap = BATCH_CI_BOOTSTRAP
+
+    if batch_bootstrap and not vectorize:
+        warnings.warn(
+            "batch_bootstrap=True requires VECTORIZE_DATA_GENERATION=True; "
+            "falling back to per-rep loop.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     # Use separate RNG streams for data generation and bootstrap resampling so
     # that the n_reps datasets are identical regardless of n_boot.  A shared
@@ -211,26 +233,89 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
             n, n_distinct, distribution_type, rho_s, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict)
 
-    gen_fn = get_generator(generator) if generator not in ("nonparametric",) else None
-    for rep in range(n_reps):
-        x = generate_cumulative_aluminum(
-            n, n_distinct, distribution_type=distribution_type,
+    if batch_bootstrap and vectorize:
+        # --- NEW BATCH PATH ---
+        # Step 1: Pre-generate all datasets using data_rng
+        x_all = generate_cumulative_aluminum_batch(
+            n_reps, n, n_distinct, distribution_type=distribution_type,
             all_distinct=all_distinct, freq_dict=freq_dict, rng=data_rng)
+
         if generator == "nonparametric":
-            y = generate_y_nonparametric(x, rho_s, y_params, rng=data_rng,
-                                          _calibrated_rho=cal_rho,
-                                          _ln_params=ln_params)
+            y_all = generate_y_nonparametric_batch(
+                x_all, rho_s, y_params, rng=data_rng,
+                _calibrated_rho=cal_rho, _ln_params=ln_params)
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
-            y = gen_fn(x, rho_in, y_params, rng=data_rng)
+            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=data_rng)
         else:
-            y = gen_fn(x, rho_s, y_params, rng=data_rng)
-        rho_hat = _fast_spearman_rho(x, y)
-        lo, hi = bootstrap_ci_single(x, y, rho_hat, n_boot=n_boot,
-                                      alpha=alpha, rng=boot_rng)
-        lowers[rep] = lo
-        uppers[rep] = hi
-        rho_hats[rep] = rho_hat
+            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng)
+
+        # Step 2: Compute rho_hats in one vectorized call
+        rho_hats = spearman_rho_2d(x_all, y_all)  # (n_reps,)
+
+        # Step 3-4: Bootstrap resampling
+        boot_idx_all = boot_rng.integers(0, n, size=(n_boot, n_reps, n),
+                                         dtype=np.int32)
+        if use_numba() and _batch_bootstrap_rhos_jit is not None:
+            boot_rho_matrix = _batch_bootstrap_rhos_jit(
+                x_all.astype(np.float64), y_all.astype(np.float64),
+                boot_idx_all)
+        else:
+            boot_rho_matrix = np.empty((n_reps, n_boot))
+            rows = np.arange(n_reps)[:, None]
+            for b in range(n_boot):
+                x_boot = x_all[rows, boot_idx_all[b]]
+                y_boot = y_all[rows, boot_idx_all[b]]
+                boot_rho_matrix[:, b] = spearman_rho_2d(x_boot, y_boot)
+
+        # Step 5: Percentiles per rep
+        lowers = np.nanpercentile(boot_rho_matrix, 100 * alpha / 2, axis=1)
+        uppers = np.nanpercentile(boot_rho_matrix, 100 * (1 - alpha / 2), axis=1)
+
+    elif vectorize:
+        # --- EXISTING VECTORIZE PATH (unchanged) ---
+        x_reps = generate_cumulative_aluminum_batch(
+            n_reps, n, n_distinct, distribution_type=distribution_type,
+            all_distinct=all_distinct, freq_dict=freq_dict, rng=data_rng)
+        if generator == "nonparametric":
+            y_reps = generate_y_nonparametric_batch(
+                x_reps, rho_s, y_params, rng=data_rng,
+                _calibrated_rho=cal_rho, _ln_params=ln_params)
+        elif generator == "copula":
+            rho_in = cal_rho if cal_rho is not None else rho_s
+            y_reps = generate_y_copula_batch(x_reps, rho_in, y_params, rng=data_rng)
+        else:
+            y_reps = generate_y_linear_batch(x_reps, rho_s, y_params, rng=data_rng)
+
+        for rep in range(n_reps):
+            x, y = x_reps[rep], y_reps[rep]
+            rho_hat = _fast_spearman_rho(x, y)
+            lo, hi = bootstrap_ci_single(x, y, rho_hat, n_boot=n_boot,
+                                          alpha=alpha, rng=boot_rng)
+            lowers[rep] = lo
+            uppers[rep] = hi
+            rho_hats[rep] = rho_hat
+    else:
+        gen_fn = get_generator(generator) if generator not in ("nonparametric",) else None
+        for rep in range(n_reps):
+            x = generate_cumulative_aluminum(
+                n, n_distinct, distribution_type=distribution_type,
+                all_distinct=all_distinct, freq_dict=freq_dict, rng=data_rng)
+            if generator == "nonparametric":
+                y = generate_y_nonparametric(x, rho_s, y_params, rng=data_rng,
+                                              _calibrated_rho=cal_rho,
+                                              _ln_params=ln_params)
+            elif generator == "copula":
+                rho_in = cal_rho if cal_rho is not None else rho_s
+                y = gen_fn(x, rho_in, y_params, rng=data_rng)
+            else:
+                y = gen_fn(x, rho_s, y_params, rng=data_rng)
+            rho_hat = _fast_spearman_rho(x, y)
+            lo, hi = bootstrap_ci_single(x, y, rho_hat, n_boot=n_boot,
+                                          alpha=alpha, rng=boot_rng)
+            lowers[rep] = lo
+            uppers[rep] = hi
+            rho_hats[rep] = rho_hat
 
     return {
         "ci_lower": float(np.mean(lowers)),
@@ -247,7 +332,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
 
 def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
                      n_reps, n_boot, alpha, tie_correction_mode, seed,
-                     calibration_mode=None):
+                     calibration_mode=None, batch_bootstrap=None):
     """Run bootstrap CI + asymptotic CI for a single scenario."""
     n = case["n"]
     rho_obs = case["observed_rho"]
@@ -260,7 +345,7 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
         n, k, dt, rho_obs, y_params,
         generator=generator, n_reps=n_reps, n_boot=n_boot,
         alpha=alpha, all_distinct=all_distinct, seed=seed,
-        calibration_mode=calibration_mode)
+        calibration_mode=calibration_mode, batch_bootstrap=batch_bootstrap)
 
     asym = _asymptotic_ci_results(
         rho_obs, n, alpha, x_counts, tie_correction_mode)
@@ -284,7 +369,7 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
 
 def run_all_ci_scenarios(generator="copula", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
-                         n_jobs=1, calibration_mode=None):
+                         n_jobs=1, calibration_mode=None, batch_bootstrap=None):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.
 
     Uses bootstrap_ci_averaged (n_reps independent datasets, each
@@ -316,14 +401,14 @@ def run_all_ci_scenarios(generator="copula", n_reps=200, n_boot=None,
                 scenarios.append((case_id, case, k, dt, False,
                                   generator, n_reps, n_boot, alpha,
                                   tie_correction_mode, sc_seed,
-                                  calibration_mode))
+                                  calibration_mode, batch_bootstrap))
                 scenario_idx += 1
 
         sc_seed = (seed + scenario_idx) if seed is not None else None
         scenarios.append((case_id, case, n, None, True,
                           generator, n_reps, n_boot, alpha,
                           tie_correction_mode, sc_seed,
-                          calibration_mode))
+                          calibration_mode, batch_bootstrap))
         scenario_idx += 1
 
     if n_jobs == 1:

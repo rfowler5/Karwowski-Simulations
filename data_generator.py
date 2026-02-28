@@ -30,6 +30,7 @@ import numpy as np
 from scipy.stats import norm, rankdata
 
 from config import X_PARAMS, FREQ_DICT
+from spearman_helpers import _rank_rows
 
 GENERATORS = {
     "copula": "generate_y_copula",
@@ -601,3 +602,123 @@ def generate_y_nonparametric(x, rho_s, y_params, rng=None,
     x_ranks = rankdata(x, method="average")
     return _raw_rank_mix(x_ranks, rho_input, y_params, rng,
                          _ln_params=_ln_params)
+
+
+# ---------------------------------------------------------------------------
+# Batch data generation (vectorized over n_sims / n_reps)
+# ---------------------------------------------------------------------------
+
+def generate_cumulative_aluminum_batch(n_sims, n, n_distinct,
+                                       distribution_type=None, freq_dict=None,
+                                       all_distinct=False, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    template = _get_x_template(n, n_distinct, distribution_type, freq_dict, all_distinct)
+    x_batch = np.tile(template, (n_sims, 1))        # (n_sims, n)
+    # Independent shuffle per row (permuted in NumPy 1.20+; argsort fallback for older)
+    if hasattr(rng, 'permuted'):
+        return rng.permuted(x_batch, axis=1)
+    perm = np.argsort(rng.random((n_sims, n)), axis=1)
+    return np.take_along_axis(x_batch, perm, axis=1)
+
+
+def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng, _ln_params=None):
+    n_sims, n = x_ranks_batch.shape
+
+    # Noise ranks: independent permutation per row (permuted in NumPy 1.20+; argsort fallback)
+    noise_base = np.tile(np.arange(1.0, n + 1.0), (n_sims, 1))
+    if hasattr(rng, 'permuted'):
+        noise_ranks = rng.permuted(noise_base, axis=1)
+    else:
+        perm = np.argsort(rng.random((n_sims, n)), axis=1)
+        noise_ranks = np.take_along_axis(noise_base, perm, axis=1)
+
+    # Standardize x_ranks per row
+    s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
+    sd_x = x_ranks_batch.std(axis=1, keepdims=True, ddof=0)
+    sd_x = np.where(sd_x > 0, sd_x, 1.0)   # avoid divide-by-zero (matches 1D guard)
+    s_x /= sd_x
+
+    # Standardize noise_ranks per row
+    s_n = noise_ranks - noise_ranks.mean(axis=1, keepdims=True)
+    s_n /= noise_ranks.std(axis=1, keepdims=True, ddof=0)
+
+    rho_c = np.clip(rho_input, -0.999, 0.999)
+    mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n   # (n_sims, n)
+
+    # Lognormal y-values — MUST use mu, sigma (not default 0, 1)
+    if _ln_params is not None:
+        mu, sigma = _ln_params
+    else:
+        mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
+    y_values = rng.lognormal(mean=mu, sigma=sigma, size=(n_sims, n))
+    y_values.sort(axis=1)
+
+    # Assign: for each row, place sorted y_values at the argsort of mixed
+    order = np.argsort(mixed, axis=1)                       # (n_sims, n)
+    rows = np.arange(n_sims)[:, None]
+    y_final = np.empty_like(y_values)
+    y_final[rows, order] = y_values
+
+    return y_final
+
+
+def generate_y_nonparametric_batch(x_batch, rho_s, y_params, rng=None,
+                                    _calibrated_rho=None, _ln_params=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
+    x_ranks_batch = _rank_rows(x_batch)     # from spearman_helpers — Numba-accelerated
+    return _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
+                               _ln_params=_ln_params)
+
+
+def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    n_sims, n = x_batch.shape
+    rho_p = _spearman_to_pearson(rho_s)
+
+    ranks_x = _rank_rows(x_batch)                               # (n_sims, n)
+    u_x = (ranks_x - 0.5) / n
+    u_x = np.clip(u_x + rng.normal(0, 1e-6, (n_sims, n)), 1e-8, 1 - 1e-8)
+    z_x = norm.ppf(u_x)
+
+    z_y = rho_p * z_x + np.sqrt(max(1.0 - rho_p ** 2, 0.0)) * rng.standard_normal((n_sims, n))
+    u_y = norm.cdf(z_y)
+
+    mu_ln, sigma_ln = _fit_lognormal(y_params["median"], y_params["iqr"])
+    y = _lognormal_quantile(u_y, mu_ln, sigma_ln)
+    return y
+
+
+def generate_y_linear_batch(x_batch, rho_s, y_params, rng=None):
+    if rng is None:
+        rng = np.random.default_rng()
+    n_sims, n = x_batch.shape
+    mu_ln, sigma_ln = _fit_lognormal(y_params["median"], y_params["iqr"])
+
+    if abs(rho_s) < 1e-12:
+        return np.exp(mu_ln + sigma_ln * rng.standard_normal((n_sims, n)))
+
+    x_std = x_batch - x_batch.mean(axis=1, keepdims=True)
+    sx = x_std.std(axis=1, keepdims=True, ddof=0)
+    # If all x identical in a row (degenerate), fall back to noise-only
+    ok = sx > 1e-12
+    sx = np.where(ok, sx, 1.0)
+    x_std = x_std / sx
+
+    rho_target = _spearman_to_pearson(rho_s)
+    rho_target = np.clip(rho_target, -0.999, 0.999)
+
+    b = rho_target * sigma_ln
+    noise_var = sigma_ln ** 2 * (1.0 - rho_target ** 2)
+    noise_sd = np.sqrt(max(noise_var, 1e-12))
+
+    log_y = mu_ln + b * x_std + noise_sd * rng.standard_normal((n_sims, n))
+    y = np.exp(log_y)
+    # Where sx was degenerate, replace with pure noise
+    if not np.all(ok):
+        bad = ~ok.ravel()
+        y[bad] = np.exp(mu_ln + sigma_ln * rng.standard_normal((bad.sum(), n)))
+    return y

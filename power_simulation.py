@@ -28,17 +28,22 @@ from joblib import Parallel, delayed
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_SIMS, ALPHA, TARGET_POWER,
-                    POWER_SEARCH_DIRECTION, CALIBRATION_MODE)
+                    POWER_SEARCH_DIRECTION, CALIBRATION_MODE,
+                    VECTORIZE_DATA_GENERATION)
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
-                            generate_y_nonparametric, _fit_lognormal)
+                            generate_y_nonparametric, _fit_lognormal,
+                            generate_cumulative_aluminum_batch,
+                            generate_y_nonparametric_batch,
+                            generate_y_copula_batch,
+                            generate_y_linear_batch)
 from spearman_helpers import spearman_rho_pvalue_2d
 
 
 def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
                    generator="nonparametric", n_sims=None, alpha=None,
                    all_distinct=False, seed=None, freq_dict=None,
-                   calibration_mode=None):
+                   calibration_mode=None, vectorize=None):
     """Estimate power of a two-sided Spearman test via Monte Carlo.
 
     Parameters
@@ -60,6 +65,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         alpha = ALPHA
     if calibration_mode is None:
         calibration_mode = CALIBRATION_MODE
+    if vectorize is None:
+        vectorize = VECTORIZE_DATA_GENERATION
 
     gen_fn = get_generator(generator)
     rng = np.random.default_rng(seed)
@@ -76,23 +83,37 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
             n, n_distinct, distribution_type, rho_s, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict)
 
-    x_all = np.empty((n_sims, n))
-    y_all = np.empty((n_sims, n))
-    for i in range(n_sims):
-        xi = generate_cumulative_aluminum(
-            n, n_distinct, distribution_type=distribution_type,
+    if vectorize:
+        x_all = generate_cumulative_aluminum_batch(
+            n_sims, n, n_distinct, distribution_type=distribution_type,
             all_distinct=all_distinct, freq_dict=freq_dict, rng=rng)
         if generator == "nonparametric":
-            yi = generate_y_nonparametric(xi, rho_s, y_params, rng=rng,
-                                          _calibrated_rho=cal_rho,
-                                          _ln_params=ln_params)
+            y_all = generate_y_nonparametric_batch(
+                x_all, rho_s, y_params, rng=rng,
+                _calibrated_rho=cal_rho, _ln_params=ln_params)
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
-            yi = gen_fn(xi, rho_in, y_params, rng=rng)
+            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=rng)
         else:
-            yi = gen_fn(xi, rho_s, y_params, rng=rng)
-        x_all[i] = xi
-        y_all[i] = yi
+            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=rng)
+    else:
+        x_all = np.empty((n_sims, n))
+        y_all = np.empty((n_sims, n))
+        for i in range(n_sims):
+            xi = generate_cumulative_aluminum(
+                n, n_distinct, distribution_type=distribution_type,
+                all_distinct=all_distinct, freq_dict=freq_dict, rng=rng)
+            if generator == "nonparametric":
+                yi = generate_y_nonparametric(xi, rho_s, y_params, rng=rng,
+                                              _calibrated_rho=cal_rho,
+                                              _ln_params=ln_params)
+            elif generator == "copula":
+                rho_in = cal_rho if cal_rho is not None else rho_s
+                yi = gen_fn(xi, rho_in, y_params, rng=rng)
+            else:
+                yi = gen_fn(xi, rho_s, y_params, rng=rng)
+            x_all[i] = xi
+            y_all[i] = yi
 
     _, pvals = spearman_rho_pvalue_2d(x_all, y_all, n)
     return np.sum(pvals < alpha) / n_sims

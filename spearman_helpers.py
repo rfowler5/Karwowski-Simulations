@@ -88,8 +88,40 @@ if _NUMBA_AVAILABLE:
             ry = _tied_rank(yb)
             rhos[b] = _pearson_on_ranks_1d(rx, ry)
         return rhos
+
+    @njit(fastmath=True, cache=True, parallel=True)
+    def _batch_bootstrap_rhos_jit(x_all, y_all, boot_idx_all):
+        """Batch bootstrap Spearman rho, parallel over all (rep, boot) pairs.
+
+        Parameters
+        ----------
+        x_all, y_all : (n_reps, n) float64
+        boot_idx_all : (n_boot, n_reps, n) int32
+            Pre-generated bootstrap indices.
+
+        Returns
+        -------
+        result : (n_reps, n_boot) float64
+        """
+        n_boot, n_reps, n = boot_idx_all.shape
+        result = np.empty((n_reps, n_boot), dtype=np.float64)
+        total = n_reps * n_boot
+        for flat in prange(total):
+            rep = flat // n_boot
+            b = flat % n_boot
+            xb = np.empty(n, dtype=np.float64)
+            yb = np.empty(n, dtype=np.float64)
+            for i in range(n):
+                idx = boot_idx_all[b, rep, i]
+                xb[i] = x_all[rep, idx]
+                yb[i] = y_all[rep, idx]
+            rx = _tied_rank(xb)
+            ry = _tied_rank(yb)
+            result[rep, b] = _pearson_on_ranks_1d(rx, ry)
+        return result
 else:
     _bootstrap_rhos_jit = None
+    _batch_bootstrap_rhos_jit = None
 
 # ---------------------------------------------------------------------------
 # Public ranking and correlation functions
