@@ -89,7 +89,11 @@ This holds purely from covariance algebra — no assumption is required that $X$
 
 The final Spearman $\rho_s$ is the Pearson correlation of the ranks of x and the reordered y. With no ties, this would equal $\rho_{\mathrm{cal}}$ (ranks are monotone transforms). With heavy ties in x, midranks compress the effective variance/resolution of $s_x$ (large blocks of identical values), so the mapping from the finely resolved mixed ranks back to the clumped ranks of x attenuates the realised Spearman below $\rho_{\mathrm{cal}}$.
 
-Approximate attenuation factor: $\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}$, where $m_j$ are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in $\rho_{\mathrm{cal}}$, which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
+Approximate attenuation factor:
+
+$$\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}$$
+
+where $m_j$ are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in $\rho_{\mathrm{cal}}$, which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
 
 All rank-based simulation methods (including full Iman-Conover) face similar attenuation with heavy ties; the calibration step ensures the realised Spearman matches the target within tolerance (typically < 0.01 bias).
 
