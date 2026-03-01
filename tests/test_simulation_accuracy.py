@@ -20,20 +20,25 @@ Programmatic usage
 CLI usage
 ---------
 Quick check (few sims, worst-case scenario):
-    python test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+    python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 
 Full sweep:
-    python test_simulation_accuracy.py --n-sims 200
+    python tests/test_simulation_accuracy.py --n-sims 200
 
 Custom frequency distribution:
-    python test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
+    python tests/test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
 
 Specific generators:
-    python test_simulation_accuracy.py --generators copula,nonparametric
+    python tests/test_simulation_accuracy.py --generators copula,nonparametric
 """
 
-import argparse
 import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+import argparse
 
 import numpy as np
 import pandas as pd

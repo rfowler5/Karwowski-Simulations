@@ -1,4 +1,10 @@
 """Compare single scenario: batch_bootstrap=True vs False."""
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import time
 from config import CASES
 from confidence_interval_calculator import bootstrap_ci_averaged

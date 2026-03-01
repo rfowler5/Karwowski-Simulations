@@ -20,20 +20,26 @@ Programmatic usage
 CLI usage
 ---------
 Power only (fast):
-    python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --power-only
+    python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --power-only
 
 CI only:
-    python run_single_scenario.py --case 1 --n-distinct 4 --dist-type even --ci-only --n-reps 20 --n-boot 500
+    python scripts/run_single_scenario.py --case 1 --n-distinct 4 --dist-type even --ci-only --n-reps 20 --n-boot 500
 
 All-distinct baseline:
-    python run_single_scenario.py --case 1 --all-distinct --n-sims 500
+    python scripts/run_single_scenario.py --case 1 --all-distinct --n-sims 500
 
 Custom frequency distribution:
-    python run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
+    python scripts/run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
 
 Skip specific methods:
-    python run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --skip-copula --skip-linear
+    python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --skip-copula --skip-linear
 """
+
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
 import argparse
 import time

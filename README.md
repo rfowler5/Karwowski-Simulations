@@ -34,7 +34,7 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 
 - **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR. Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so this choice for generating y in our simulation is a good approximation.
 
-- **Tie structure distributions:** Three frequency distributions (`even`, `heavy_tail`, `heavy_center`) are tested for sensitivity; differences across them are small, which is reassuring given unavailable raw data. `heavy_center` is considered most plausible for real vaccination schedules: most children followed the schedule and would be clustered in the middle for ages 9–13 months, with the middle 50% under 12 months. More realistic skewed patterns have also been explored but are currently undocumented here (e.g., for k=4 distinct values: only 2–5 observations in the tails, heavy concentration in the second value, and substantial but lower counts in the third). Users can test custom frequencies with `run_single_scenario.py --freq`.
+- **Tie structure distributions:** Three frequency distributions (`even`, `heavy_tail`, `heavy_center`) are tested for sensitivity; differences across them are small, which is reassuring given unavailable raw data. `heavy_center` is considered most plausible for real vaccination schedules: most children followed the schedule and would be clustered in the middle for ages 9–13 months, with the middle 50% under 12 months. More realistic skewed patterns have also been explored but are currently undocumented here (e.g., for k=4 distinct values: only 2–5 observations in the tails, heavy concentration in the second value, and substantial but lower counts in the third). Users can test custom frequencies with `scripts/run_single_scenario.py --freq`.
 
 - **Method consistency:** The linear Monte Carlo method produces results that are virtually identical to the recommended non-parametric rank-mixing method. The Gaussian copula method (which uses single-point calibration at rho = 0.30) is retained for comparison and performs very well in all-distinct (no-ties) scenarios. It shows mild attenuation with heavy ties due to jittering but remains a useful secondary check when used with calibration.
 
@@ -137,7 +137,7 @@ Required packages: numpy, scipy, pandas, joblib. **Numba** (recommended) is incl
 On the first run after installation, Numba compiles JIT functions (5-15 seconds). To pre-warm the cache:
 
 ```bash
-python warm_up_numba.py
+python scripts/warm_up_numba.py
 ```
 
 To copy the cache to a cloud VM for zero compile delay:
@@ -154,57 +154,57 @@ All scripts expose a `main()` function that can be called from Python:
 
 ```python
 # Full simulation
-from run_simulation import main as run_sim
+from scripts.run_simulation import main as run_sim
 power_df, ci_df, all_distinct_df = run_sim(n_sims=500, skip_linear=True)
 
 # Single scenario
-from run_single_scenario import main as run_single
+from scripts.run_single_scenario import main as run_single
 result = run_single(case=3, n_distinct=4, dist_type="heavy_center", n_sims=500)
 result = run_single(case=3, freq=[19, 18, 18, 18], power_only=True, verbose=False)
 
 # Accuracy testing
-from test_simulation_accuracy import main as test_accuracy
+from tests.test_simulation_accuracy import main as test_accuracy
 df = test_accuracy(n_sims=50, cases=[3], custom_freq=[(3, [19, 18, 18, 18])])
 ```
 
 ### Full simulation (all methods, all scenarios)
 
 ```bash
-python run_simulation.py
+python scripts/run_simulation.py
 ```
 
 ### Quick test run
 
 ```bash
-python run_simulation.py --n-sims 500 --seed 42
+python scripts/run_simulation.py --n-sims 500 --seed 42
 ```
 
 ### Disable Numba (force pure NumPy fallback)
 
 ```bash
-python run_simulation.py --n-sims 500 --seed 42 --no-numba
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --no-numba
+python scripts/run_simulation.py --n-sims 500 --seed 42 --no-numba
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --no-numba
 ```
 
 ### Skip specific methods
 
 ```bash
-python run_simulation.py --skip-linear --skip-copula   # nonparametric + empirical + asymptotic
-python run_simulation.py --skip-nonparametric           # copula + linear + empirical + asymptotic
-python run_simulation.py --skip-empirical                # omit empirical (e.g. when digitized data unavailable)
+python scripts/run_simulation.py --skip-linear --skip-copula   # nonparametric + empirical + asymptotic
+python scripts/run_simulation.py --skip-nonparametric           # copula + linear + empirical + asymptotic
+python scripts/run_simulation.py --skip-empirical                # omit empirical (e.g. when digitized data unavailable)
 ```
 
 ### Calibration mode (nonparametric only)
 
 ```bash
-python run_simulation.py --calibration-mode multipoint   # default: more accurate, ~3× calibration cost
-python run_simulation.py --calibration-mode single       # faster calibration for exploratory runs
+python scripts/run_simulation.py --calibration-mode multipoint   # default: more accurate, ~3× calibration cost
+python scripts/run_simulation.py --calibration-mode single       # faster calibration for exploratory runs
 ```
 
 ### Filter scenarios
 
 ```bash
-python run_simulation.py --cases 1,3 --n-distinct 4,10 --dist-types even,heavy_center
+python scripts/run_simulation.py --cases 1,3 --n-distinct 4,10 --dist-types even,heavy_center
 ```
 
 ### Single-scenario quick script
@@ -213,26 +213,26 @@ Run power and/or CI for a specific (case, k, distribution) combination:
 
 ```bash
 # Power + CI for Case 3, k=4, heavy_center
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500
 
 # Power only, skip copula, linear, and empirical
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --power-only --skip-copula --skip-linear --skip-empirical
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type even --power-only --skip-copula --skip-linear --skip-empirical
 
 # CI only for all-distinct baseline
-python run_single_scenario.py --case 1 --all-distinct --ci-only --n-reps 20 --n-boot 500
+python scripts/run_single_scenario.py --case 1 --all-distinct --ci-only --n-reps 20 --n-boot 500
 
 # Custom frequency distribution (counts must sum to case's n)
-python run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
+python scripts/run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
 
 # Calibration mode (multipoint default, single for faster runs)
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --calibration-mode single
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --calibration-mode single
 ```
 
 ### Asymptotic tie-correction modes
 
 ```bash
-python run_simulation.py --tie-correction both          # report both corrected and uncorrected
-python run_simulation.py --tie-correction without_tie_correction
+python scripts/run_simulation.py --tie-correction both          # report both corrected and uncorrected
+python scripts/run_simulation.py --tie-correction without_tie_correction
 ```
 
 ## Validation
@@ -241,24 +241,24 @@ Test whether generators achieve the target Spearman rho:
 
 ```bash
 # Quick check on worst-case scenario
-python test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 
 # Full sweep, all generators
-python test_simulation_accuracy.py --n-sims 200
+python tests/test_simulation_accuracy.py --n-sims 200
 
 # Specific generators only (empirical requires digitized data)
-python test_simulation_accuracy.py --generators nonparametric,copula --n-sims 100
+python tests/test_simulation_accuracy.py --generators nonparametric,copula --n-sims 100
 
-python test_simulation_accuracy.py --generators empirical --case 3 --n-sims 100
+python tests/test_simulation_accuracy.py --generators empirical --case 3 --n-sims 100
 
 # Custom frequency distribution (requires --case; counts must sum to case's n)
-python test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
+python tests/test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
 
 # Save results to CSV
-python test_simulation_accuracy.py --n-sims 200 --outfile accuracy_report.csv
+python tests/test_simulation_accuracy.py --n-sims 200 --outfile accuracy_report.csv
 
 # Calibration mode (multipoint default, single for faster runs)
-python test_simulation_accuracy.py --n-sims 200 --calibration-mode single
+python tests/test_simulation_accuracy.py --n-sims 200 --calibration-mode single
 ```
 
 The script flags scenarios where |mean_simulated_rho - target_rho| > 0.01 (configurable via `--threshold`). With default n_sims=50–200, some flags may be Monte Carlo noise. To get all scenarios to pass, you may need to increase `--n-sims` to 1000, 5000, or 10000 depending on the tie structure and threshold.
@@ -273,23 +273,33 @@ Results are saved to the `results/` directory:
 
 ## Project Structure
 
-```
-config.py                        -- Case parameters, frequency dictionary, settings
-data_generator.py                -- X generation (ties) and Y generation (all methods)
-power_simulation.py              -- Unified Monte Carlo power (all generators)
-power_simulation_copula.py       -- Legacy copula-specific power module
-power_simulation_linear.py       -- Legacy linear-specific power module
-power_asymptotic.py              -- Asymptotic power and CI formulas
-confidence_interval_calculator.py -- Bootstrap CIs (averaged over multiple datasets)
-table_outputs.py                 -- Summary table construction and CSV export
-run_simulation.py                -- Main orchestrator / CLI entry point
-run_single_scenario.py           -- Quick single-scenario testing script
-test_simulation_accuracy.py      -- Validation: generator accuracy testing
-benchmark_batch_vs_no_batch.py   -- CI: batch vs per-rep path (single scenario)
-benchmark_full_grid.py            -- CI: full grid, old vs new path, parallel variants
-benchmark_ci_bootstrap.py         -- CI: multipoint vs single calibration
-benchmark_power.py                -- Power: vectorize vs scalar, calibration modes
-```
+**Root (core modules):**
+- `config.py` — Case parameters, frequency dictionary, settings
+- `data_generator.py` — X generation (ties) and Y generation (all methods)
+- `power_simulation.py` — Unified Monte Carlo power (all generators)
+- `power_asymptotic.py` — Asymptotic power and CI formulas
+- `confidence_interval_calculator.py` — Bootstrap CIs (averaged over multiple datasets)
+- `table_outputs.py` — Summary table construction and CSV export
+- `spearman_helpers.py` — Vectorized Spearman and Numba JIT helpers
+
+**scripts/** — Entry points and one-off utilities
+- `run_simulation.py` — Main orchestrator / CLI entry point
+- `run_single_scenario.py` — Quick single-scenario testing script
+- `warm_up_numba.py` — Pre-compile Numba JIT cache
+
+**benchmarks/** — Runtime benchmarks (run one at a time)
+- `benchmark_power.py` — Power: vectorize vs scalar, calibration modes
+- `benchmark_full_grid.py` — CI: full grid, per-rep vs batch bootstrap
+- `benchmark_batch_vs_no_batch.py` — CI: batch vs per-rep path (single scenario)
+- `benchmark_ci_bootstrap.py` — CI: multipoint vs single calibration
+
+**tests/** — Validation and verification
+- `test_simulation_accuracy.py` — Generator accuracy testing
+- `validation_test_spearman2d.py` — Spearman 2D vs reference
+- `validate_batch_ci_three_steps.py` — Batch CI bit-identical and timing
+- `verify_big_gap.py`, `verify_nested_parallelism.py` — Parallelism verification
+
+Run all commands from the **project root** (e.g. `python scripts/run_simulation.py`).
 
 ## Method Choices and Rationale
 
@@ -301,7 +311,7 @@ The Gaussian copula assumes continuous marginals for the rank-to-normal-to-rank 
 
 With tied x-values, the midrank representation has lower variance than distinct ranks. This means the rank-mixing formula `mixed = rho * s_x + sqrt(1-rho^2) * s_noise` produces a Spearman rho slightly below the target rho. The calibration step computes a rho-independent attenuation ratio by probing at a fixed rho (0.30) and using bisection over 300 samples. This ratio is then multiplied by any target rho to compensate for the attenuation. The ratio is cached per (n, k, dist_type), so the cost is ~3s per unique tie structure.
 
-**If calibration fails for a custom tie structure:** Run `test_simulation_accuracy` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
+**If calibration fails for a custom tie structure:** Run `tests/test_simulation_accuracy.py` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
@@ -360,8 +370,8 @@ To check whether your chosen n_boot is sufficient, run the same scenario with n_
 **Quick check** (n_reps=50, ~1–2 min total): If the difference in CI endpoints is under ~0.003, n_boot=500 is fine for 2-decimal precision. Example:
 
 ```bash
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 500 --seed 42 --skip-copula --skip-linear
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 2000 --seed 42 --skip-copula --skip-linear
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 500 --seed 42 --skip-copula --skip-linear
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 2000 --seed 42 --skip-copula --skip-linear
 ```
 
 **Thorough check** (n_reps=200, ~5–10 min total): Use n_reps=200 for a more stable comparison and to confirm the averaged CI is well converged.
@@ -373,40 +383,82 @@ python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center -
 **Vectorization and parallelization:** The original implementation used a scalar loop over bootstrap replicates and power simulations. Several optimisations combine to speed things up:
 
 - **Vectorized Spearman** — argsort-based ranking, O(n log n) per row, replaces per-row scipy calls.
-- **Scenario-level parallelization** — **joblib** (`--n-jobs`) farms scenarios out across cores; e.g. with `n_jobs=4` for 4 logical cores, full grid CI goes from ~16 min sequential to ~8 min (**~2×**), and single-scenario CI (200 reps × 1000 boot) from ~42s to ~12s (**3.5×**). Combined with vectorized Spearman, the full CI grid is ~7× faster than the original sequential code.
 - **Vectorized data generation** — `config.VECTORIZE_DATA_GENERATION` (default True): power and CI generate all n_sims or n_reps datasets in one batch via `generate_*_batch` functions instead of looping per dataset.
-- **Batch bootstrap** — `config.BATCH_CI_BOOTSTRAP` (default True): CI generates all n_reps datasets and n_boot resamples in one batch, then computes Spearman across all bootstrap samples in a single vectorized call. Requires `VECTORIZE_DATA_GENERATION=True`. Can run into memory issues with large runs (e.g. high n_reps × n_boot).
+- **Batch bootstrap** — `config.BATCH_CI_BOOTSTRAP` (default True): CI generates all n_reps datasets and n_boot resamples in one batch, then computes Spearman across all bootstrap samples in a single Numba call. Requires `VECTORIZE_DATA_GENERATION=True`. Gives ~2.5× sequential speedup over per-rep bootstrap; see [Benchmark data](#benchmark-data-ci-bootstrap) below.
+- **Scenario-level parallelization** — **joblib** (`--n-jobs`) farms scenarios out across cores. **Caveat:** With **batch bootstrap**, parallel (`n_jobs=-1`) is often *slower* than sequential (`n_jobs=1`) due to joblib overhead and nested parallelism with Numba; see [Parallelization and Numba caveats](#parallelization-and-numba-caveats) below.
 
 These flags live in `config.py`: `VECTORIZE_DATA_GENERATION`, `BATCH_CI_BOOTSTRAP`, and `CALIBRATION_MODE` (multipoint vs single).
 
-
-
-**Calibration:** Uses a rho-independent attenuation ratio cached per (n, k, dist_type). The calibration cost is paid **once per tie structure**, not once per rho value tested during bisection -- eliminating the dominant bottleneck of the original implementation (~60× speedup for power estimation).
+**Calibration:** Uses a rho-independent attenuation ratio cached per (n, k, dist_type). The calibration cost is paid **once per tie structure**, not once per rho value tested during bisection — eliminating the dominant bottleneck of the original implementation (~60× speedup for power estimation).
 
 **Other optimisations:** `_fit_lognormal` results are LRU-cached; x-value templates are cached and only shuffled per call; a fast inline Spearman (Pearson-of-ranks + t-distribution p-value) replaces the full `scipy.stats.spearmanr` in the power estimation loop.
 
-### Typical runtimes (nonparametric generator, 4-core Windows machine)
+### Benchmark data (CI bootstrap)
+
+Two CI bootstrap modes are available. **Per-rep bootstrap** (`BATCH_CI_BOOTSTRAP=False`): for each of `n_reps` datasets, many calls to `_bootstrap_rhos_jit` (Numba). **Batch bootstrap** (`BATCH_CI_BOOTSTRAP=True`, default): one call per scenario to `_batch_bootstrap_rhos_jit` (Numba), processing all `n_reps × n_boot` tasks in one batch. Both use vectorized data generation; batch is bit-identical to per-rep for the same data and bootstrap indices.
+
+Timings below are **averages across multiple runs** (earlier range data and a single measured run) to reduce variance. Conditions: **n_reps=200, n_boot=1000**, single-point calibration, nonparametric generator, **4-logical-core Windows machine** (2 physical cores with hyperthreading). Run benchmarks one at a time to avoid CPU contention.
+
+**Single scenario (e.g. Case 3, k=4, even):**
+
+| Config | Time | Speedup vs per-rep |
+|--------|------|--------------------|
+| Per-rep bootstrap | ~4.5s | — |
+| Batch bootstrap | ~1.2s | **~3.8×** |
+
+**Full grid (88 scenarios), averaged times:**
+
+| Config | Time |
+|--------|------|
+| Per-rep bootstrap, sequential (n_jobs=1) | ~6 min (~364s) |
+| **Batch bootstrap, sequential (n_jobs=1)** | **~2.4 min (~142s)** |
+| Per-rep bootstrap, parallel (n_jobs=-1) | ~3.9 min (~235s) |
+| Batch bootstrap, parallel (n_jobs=-1) | ~4 min (~243s) — often *slower* than batch sequential |
+
+**Recommendation:** For **batch bootstrap**, use **`n_jobs=1` (sequential)**; it is the fastest (~2.4 min full grid). For per-rep bootstrap, parallel (`n_jobs=-1`) does help (~3.9 min vs ~6 min sequential).
+
+### Parallelization and Numba caveats
+
+- **Machine note:** Benchmarks were taken on a machine with **4 logical cores** (2 physical cores with hyperthreading). On such a machine, `n_jobs=-1` uses 4 joblib workers.
+- **Batch bootstrap + joblib:** With batch bootstrap, **parallel is often slower than sequential**. Reasons: (1) **Joblib overhead** — process spawn, serialization, and scheduling cost is a large fraction of the per-scenario time (~1.8s) for batch, so parallel adds net cost. (2) **Nested parallelism** — joblib spawns N workers; each worker runs Numba’s `prange` (default 4 threads), so 4×4 = 16 threads on 4 cores cause oversubscription. Most of the “parallel slower than sequential” gap (~89%) is joblib; ~11% is from Numba thread contention.
+- **Per-rep bootstrap + joblib:** Per-rep has many short Numba bursts per scenario, so joblib’s overhead is better amortized; parallel typically beats sequential for per-rep bootstrap.
+- **Memory:** Batch bootstrap allocates ~64 MB per scenario at 200×1000 (n_reps×n_boot); at 10k×1k, ~3.2 GB per scenario. Sequential runs one scenario at a time (peak ~3–4 GB on a 32 GB machine). With `n_jobs=-1`, multiple workers can spike total memory and trigger `TerminatedWorkerError` on memory-constrained systems; use `n_jobs=1` for batch bootstrap or limit workers (e.g. `n_jobs=2`).
+- **Validation:** Batch and per-rep bootstrap are bit-identical for the same data and bootstrap indices. See `tests/validate_batch_ci_three_steps.py`, `tests/verify_nested_parallelism.py`, and `tests/verify_big_gap.py` (and `docs/BENCHMARKING_FINDINGS.md`) to reproduce.
+
+### Typical runtimes (nonparametric generator, 4-logical-core machine)
+
+**Without vectorized data generation or batching** (parallelization and vectorized Spearman only):
 
 | Task | Approximate time |
 |------|-----------------|
-| Single scenario CI (200 reps x 1000 boot) | ~12s |
+| Full grid CI (88 scenarios), n_jobs=1, 200 reps × 1000 boot | ~16 min |
+| Full grid CI (88 scenarios), n_jobs=4, 200 reps × 1000 boot | ~8 min |
+
+With this setup, joblib at `n_jobs=4` gives **~2×** on the full grid (16 min → 8 min) and **~3.5×** on single-scenario CI (200×1000): ~42s sequential → ~12s parallel. Combined with vectorized Spearman, the full CI grid is **~7× faster** than the original sequential code.
+
+**With vectorized data generation and batch bootstrap** (default) and **Numba** (recommended). Sequential is preferred for CI; parallel can be used for power.
+
+| Task | Approximate time |
+|------|-----------------|
+| Single scenario CI (200 reps × 1000 boot), batch bootstrap, n_jobs=1 | ~1.2s |
 | Single scenario power (500 sims, n_cal=300) | ~5s (includes calibration) |
 | Single scenario power (10,000 sims, n_cal=300) | ~45s |
-| Full grid CI (88 scenarios), n_jobs=1, 200 reps x 1000 boot | ~16 min |
-| Full grid CI (88 scenarios), n_jobs=4, 200 reps x 1000 boot | ~8 min |
+| Full grid CI (88 scenarios), batch bootstrap, n_jobs=1, 200×1000 | ~2.4 min |
+| Full grid CI (88 scenarios), per-rep bootstrap, n_jobs=1, 200×1000 | ~6 min |
+| Full grid CI (88 scenarios), per-rep bootstrap, n_jobs=4, 200×1000 | ~3.9 min |
 | Full grid power (88 scenarios, 500 sims, n_cal=300), n_jobs=1 | ~6 min |
 | Full grid power (88 scenarios, 500 sims, n_cal=300), n_jobs=4 | ~3 min |
 
 ### With Numba JIT (recommended)
 
-Numba JIT compilation adds inner thread parallelism to the ranking and bootstrap loops. Combined with scenario-level `--n-jobs`, expected speedups on a 4-logical-core machine:
+Numba JIT compilation speeds up the bootstrap and ranking loops. Pre-warm with `python scripts/warm_up_numba.py` to avoid first-run compile delay. On a 4-logical-core machine, use **n_jobs=1** for CI with batch bootstrap as above; for power or per-rep bootstrap CI, `n_jobs=4` or `-1` can reduce wall time.
 
 | Task | Without Numba | With Numba | Speedup |
 |------|--------------|------------|---------|
-| Single scenario CI (200 reps x 500 boot) | ~12s | ~3-5s | ~3x |
-| Single scenario power (500 sims, n_cal=300) | ~5s | ~2-3s | ~2x |
-| Full grid CI (88 scenarios, n_reps=7400, n_boot=500, n_jobs=4) | ~2.5 h | ~20-45 min | ~4-8x |
-| Full grid power (88 scenarios, n_sims=10k, n_cal=300, n_jobs=4) | ~30-60 min | ~5-12 min | ~4-6x |
+| Single scenario CI (200 reps × 500 boot) | ~12s | ~3–5s | ~3× |
+| Single scenario power (500 sims, n_cal=300) | ~5s | ~2–3s | ~2× |
+| Full grid CI (88 scenarios, n_reps=7400, n_boot=500, n_jobs=1 batch) | ~2.5 h | ~20–45 min | ~4–8× |
+| Full grid power (88 scenarios, n_sims=10k, n_cal=300, n_jobs=4) | ~30–60 min | ~5–12 min | ~4–6× |
 
 On a 16-vCPU cloud machine (e.g. Hetzner CPX51), full CI grid per generator (88 scenarios, n_reps=7400, n_boot=500, n_jobs=-1) completes in under 12 minutes with Numba and pre-warmed cache.
 
@@ -415,38 +467,39 @@ Copula and linear generators have similar per-sim cost but no calibration overhe
 ### Tips
 
 - **Benchmarking:** Run sequential and parallel benchmarks separately, one at a time. Concurrent runs cause CPU contention and invalidate timing results.
+- **CI (batch bootstrap):** Use `--n-jobs 1` for batch bootstrap; parallel often slows it down (see [Parallelization and Numba caveats](#parallelization-and-numba-caveats)). For per-rep bootstrap, `--n-jobs 4` or `-1` helps.
 - Use `--n-sims 500` for exploratory runs (seconds to minutes) vs `10000` for production.
-- Use `python run_simulation.py --n-jobs 4` to parallelize across 4 cores and (if this is actually 2 cores with hyperthreading) roughly halve full-grid runtimes. Use `--n-jobs -1` to use all available cores.
+- On a 4-logical-core machine (e.g. 2 physical cores with hyperthreading), `--n-jobs 4` or `-1` parallelizes across logical cores; for power and per-rep bootstrap CI this can roughly halve full-grid runtimes.
 - The calibration step adds ~3s (single-point) or ~9s (multipoint, default) per unique (N, k, distribution) tie structure on first run; cached thereafter and reused across all rho values. Use `--calibration-mode single` for faster exploratory runs.
 - Bootstrap CIs dominate total runtime when using many reps and resamples. With `--n-reps 200`, use `--n-boot 500` (bootstrap noise is negligible). With `--n-reps 1600` or higher, `--n-boot 200`–`400` suffices; `--n-boot 500` is comfortable. Use `--n-reps 20 --n-boot 500` for quick checks.
-- Use `run_single_scenario.py` to test individual scenarios quickly before committing to a full run.
+- Use `scripts/run_single_scenario.py` to test individual scenarios quickly before committing to a full run.
 - Filter scenarios with `--cases`, `--n-distinct`, `--dist-types` to reduce the grid.
 - Use `--skip-copula --skip-linear` to run only the recommended nonparametric + empirical + asymptotic methods. Use `--skip-empirical` when digitized data is unavailable.
 
 ## Benchmark scripts
 
-Four scripts measure performance of the main optimisations. Run them one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
+Four scripts measure performance of the main optimisations (vectorized data generation, batch CI bootstrap). Run scripts one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
 
 | Script | Purpose |
 |--------|---------|
-| `benchmark_batch_vs_no_batch.py` | Single scenario: `batch_bootstrap=False` vs `True` (per-rep vs batch CI path). Case 3, k=4, even, n_reps=200, n_boot=1000. |
-| `benchmark_full_grid.py` | Full 88-scenario CI grid: old path vs new path, sequential vs parallel, and Numba thread variants. Uses n_reps=200, n_boot=1000. |
-| `benchmark_ci_bootstrap.py` | CI bootstrap with batch path: multipoint vs single-point calibration. Single scenario and 22-scenario subset. `--quick` runs only single-scenario (~1 min). |
-| `benchmark_power.py` | Power simulation: vectorized vs scalar data generation, multipoint vs single calibration, sequential vs parallel full grid. `--quick` skips full grid. |
+| `benchmarks/benchmark_batch_vs_no_batch.py` | Single scenario: per-rep bootstrap vs batch bootstrap. Case 3, k=4, even, n_reps=200, n_boot=1000. |
+| `benchmarks/benchmark_full_grid.py` | Full 88-scenario CI grid: per-rep vs batch bootstrap, sequential vs parallel, and Numba thread variants. Uses n_reps=200, n_boot=1000. |
+| `benchmarks/benchmark_ci_bootstrap.py` | Batch CI bootstrap: multipoint vs single-point calibration. Single scenario and 22-scenario subset. `--quick` runs only single-scenario (~1 min). |
+| `benchmarks/benchmark_power.py` | Power simulation: vectorized vs scalar data generation, multipoint vs single calibration, sequential vs parallel full grid. `--quick` skips full grid. |
 
 ```bash
 # Quick single-scenario comparisons
-python benchmark_batch_vs_no_batch.py
-python benchmark_ci_bootstrap.py --quick
-python benchmark_power.py --quick
+python benchmarks/benchmark_batch_vs_no_batch.py
+python benchmarks/benchmark_ci_bootstrap.py --quick
+python benchmarks/benchmark_power.py --quick
 
 # Full benchmarks (several minutes each)
-python benchmark_full_grid.py
-python benchmark_ci_bootstrap.py
-python benchmark_power.py
+python benchmarks/benchmark_full_grid.py
+python benchmarks/benchmark_ci_bootstrap.py
+python benchmarks/benchmark_power.py
 ```
 
-See `docs/BENCHMARKING_FINDINGS.md` for results and notes on nested parallelism and memory usage.
+See `docs/BENCHMARKING_FINDINGS.md` for detailed results, decomposition of joblib vs Numba overhead, nested parallelism, memory notes, and verification scripts in `tests/` (`validate_batch_ci_three_steps.py`, `verify_nested_parallelism.py`, `verify_big_gap.py`).
 
 ## Cloud Deployment
 
@@ -455,11 +508,11 @@ See `docs/BENCHMARKING_FINDINGS.md` for results and notes on nested parallelism 
 **With pre-copied Numba cache (recommended):**
 
 ```bash
-# On local machine (after running warm_up_numba.py):
+# On local machine (after running scripts/warm_up_numba.py):
 rsync -avz ~/.cache/numba/ root@YOUR-IP:~/.cache/numba/
 
 # On cloud VM:
-python run_simulation.py --n-sims 10000 --skip-copula --skip-linear --n-jobs -1 --seed 42
+python scripts/run_simulation.py --n-sims 10000 --skip-copula --skip-linear --n-jobs -1 --seed 42
 ```
 
 **Full CI grid (all generators):**

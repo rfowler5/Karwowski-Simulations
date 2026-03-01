@@ -1,5 +1,11 @@
 """Validation tests for spearman_helpers: spearman_rho_2d and spearman_rho_pvalue_2d."""
 
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import argparse
 _numba_pre = argparse.ArgumentParser(add_help=False)
 _numba_pre.add_argument("--no-numba", action="store_true")

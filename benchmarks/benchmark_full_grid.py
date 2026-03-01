@@ -2,6 +2,12 @@
 Benchmark old vs new path on full 88-scenario grid.
 Per plan: run sequential first, then parallel. One at a time.
 """
+import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import time
 from confidence_interval_calculator import run_all_ci_scenarios, bootstrap_ci_averaged, bootstrap_ci_single
 import numba

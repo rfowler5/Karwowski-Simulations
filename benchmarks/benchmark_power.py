@@ -3,6 +3,11 @@ Benchmark power simulation: vectorize vs non-vectorize, calibration modes,
 sequential vs parallel. Run one at a time per benchmarking rule.
 """
 import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import time
 from config import CASES
 from power_simulation import estimate_power, min_detectable_rho, run_all_scenarios

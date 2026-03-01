@@ -59,7 +59,7 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 
 **Combined result**: Full CI grid ~7× faster than original sequential code. With Numba: ~20–28× total speedup.
 
-**Implementation**: Vectorized Spearman (`spearman_helpers.py`), scenario-level parallelization (`joblib.Parallel`), **Numba JIT** (`_rank_rows_numba`, `_bootstrap_rhos_jit`) when `config.USE_NUMBA=True`. CLI: `--no-numba` / `--numba` flags; warm-up via `warm_up_numba.py`. Default `n_jobs=1`; `n_jobs=-1` uses all cores.
+**Implementation**: Vectorized Spearman (`spearman_helpers.py`), scenario-level parallelization (`joblib.Parallel`), **Numba JIT** (`_rank_rows_numba`, `_bootstrap_rhos_jit`) when `config.USE_NUMBA=True`. CLI: `--no-numba` / `--numba` flags; warm-up via `scripts/warm_up_numba.py`. Default `n_jobs=1`; `n_jobs=-1` uses all cores.
 
 ---
 
@@ -73,14 +73,16 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 | `power_asymptotic.py` | Non-central t power, Fisher z CI, tie correction (FHP), `get_x_counts` |
 | `confidence_interval_calculator.py` | `bootstrap_ci_single`, `bootstrap_ci_averaged`, `run_all_ci_scenarios`; uses `spearman_rho_2d` (vectorized) and `_bootstrap_rhos_jit` (Numba) when available |
 | `spearman_helpers.py` | `spearman_rho_2d`, `_fast_spearman_rho`, `spearman_rho_pvalue_2d` (vectorized helpers). **Numba JIT**: `_rank_rows_numba`, `_bootstrap_rhos_jit` (optional, controlled by `config.USE_NUMBA`) |
-| `run_simulation.py` | Main orchestrator; runs MC + asymptotic + CI; CLI with `--no-numba`/`--numba` flags |
-| `run_single_scenario.py` | Single-scenario power/CI; supports `--freq` for custom distributions; CLI with `--no-numba`/`--numba` flags |
-| `warm_up_numba.py` | Pre-compiles Numba JIT functions (~5–15s first run, cached thereafter) |
-| `validation_test_spearman2d.py` | Validates Numba vs NumPy fallback produce identical results |
-| `test_simulation_accuracy.py` | Validates generators achieve target rho; flags |diff| > 0.01 |
-| `power_simulation_copula.py` | Legacy; delegates to `power_simulation` |
-| `power_simulation_linear.py` | Legacy; delegates to `power_simulation` |
 | `table_outputs.py` | Builds/saves CSV tables |
+| **scripts/** | |
+| `scripts/run_simulation.py` | Main orchestrator; runs MC + asymptotic + CI; CLI with `--no-numba`/`--numba` flags |
+| `scripts/run_single_scenario.py` | Single-scenario power/CI; supports `--freq` for custom distributions |
+| `scripts/warm_up_numba.py` | Pre-compiles Numba JIT functions (~5–15s first run, cached thereafter) |
+| **tests/** | |
+| `tests/validation_test_spearman2d.py` | Validates Numba vs NumPy fallback produce identical results |
+| `tests/test_simulation_accuracy.py` | Validates generators achieve target rho; flags \|diff\| > 0.01 |
+| `tests/validate_batch_ci_three_steps.py` | Batch CI bit-identical and timing checks |
+| `tests/verify_big_gap.py`, `tests/verify_nested_parallelism.py` | Parallelism verification |
 
 ---
 
@@ -110,24 +112,24 @@ Inter-rep SD ≈ 0.10–0.11 (N=73). SE of mean = SD/√n_reps. **n_reps guidanc
 
 ```bash
 # Full run (Numba enabled by default if installed)
-python run_simulation.py --n-sims 500 --skip-copula --skip-linear
+python scripts/run_simulation.py --n-sims 500 --skip-copula --skip-linear
 
 # Disable Numba (force pure NumPy fallback)
-python run_simulation.py --n-sims 500 --no-numba
+python scripts/run_simulation.py --n-sims 500 --no-numba
 
 # Single scenario
-python run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --power-only
+python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --n-sims 500 --power-only
 
 # Custom frequency
-python run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
+python scripts/run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
 
 # Accuracy test
-python test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 # Reference config (calibration seed 99, floor): --n-sims 4000 --n-cal 700 --generators nonparametric
 # Calibration mode: --calibration-mode multipoint (default) or --calibration-mode single
 
 # Warm up Numba cache (recommended before large runs)
-python warm_up_numba.py
+python scripts/warm_up_numba.py
 ```
 
 ---

@@ -5,8 +5,13 @@ Runs Monte Carlo (nonparametric, copula, and/or linear), asymptotic analyses,
 then produces CSV outputs and a console summary.
 """
 
-import os
 import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+import os
 import time
 import argparse
 import warnings

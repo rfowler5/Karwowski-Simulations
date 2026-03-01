@@ -4,7 +4,7 @@ Benchmark CI bootstrap: all optimizations ON, multipoint vs single calibration.
 Run ONE benchmark at a time. Do not run concurrently with other benchmarks.
 Run sequential first, then parallel.
 
-Usage: python benchmark_ci_bootstrap.py [--quick]
+Usage: python benchmarks/benchmark_ci_bootstrap.py [--quick]
   --quick  Run only single-scenario benchmarks (A, B) for fast feedback (~1 min).
 
 Configurations benchmarked (all use Numba=True, vectorize=True, batch_bootstrap=True):
@@ -17,6 +17,11 @@ Configurations benchmarked (all use Numba=True, vectorize=True, batch_bootstrap=
 """
 
 import sys
+from pathlib import Path
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
 import time
 from joblib import Parallel, delayed
 from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES, ASYMPTOTIC_TIE_CORRECTION_MODE
