@@ -32,7 +32,7 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 
 ## Assumptions
 
-- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR. Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so this choice for generating y in our simulation is a good approximation.
+- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR, or when using the empirical generator, via the **empirical distribution** (resampling from digitized Figure of Karwowski B-Al/H-Al data). Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so choosing a distribution of distinct values for generating y in our simulation is a good approximation. It should be noted though that those data points show B-Al follows a log-normal distribution, and so likely does to at N = 73, but the outliers likely shift it away from log-normal, but the H-Al data is not log-normal.
 
 - **Tie structure distributions:** Three frequency distributions (`even`, `heavy_tail`, `heavy_center`) are tested for sensitivity; differences across them are small, which is reassuring given unavailable raw data. `heavy_center` is considered most plausible for real vaccination schedules: most children followed the schedule and would be clustered in the middle for ages 9–13 months, with the middle 50% under 12 months. More realistic skewed patterns have also been explored but are currently undocumented here (e.g., for k=4 distinct values: only 2–5 observations in the tails, heavy concentration in the second value, and substantial but lower counts in the third). Users can test custom frequencies with `scripts/run_single_scenario.py --freq`.
 
@@ -61,35 +61,35 @@ This is a bivariate simplification of the Iman-Conover method, applied directly 
 
 #### Validity, Assumptions, and Attenuation with Heavy Ties
 
-The method induces an exact Pearson correlation \(\rho_{\mathrm{cal}}\) between the mixed reference ranks and the standardized midranks \(s_x\) via the bivariate Cholesky mixing:
+The method induces an exact Pearson correlation $\rho_{\mathrm{cal}}$ between the mixed reference ranks and the standardized midranks $s_x$ via the bivariate Cholesky mixing:
 
-\[
+$$
 \mathrm{mixed} = \rho_{\mathrm{cal}} \cdot s_x + \sqrt{1 - \rho_{\mathrm{cal}}^2} \cdot s_{\mathrm{noise}}
-\]
+$$
 
 where:
-- \(s_x\) = standardized midranks of x (mean 0, variance 1, incorporating ties via averaging)
-- \(s_{\mathrm{noise}}\) = standardized ranks from a random permutation (independent, mean 0, variance 1)
+- $s_x$ = standardized midranks of x (mean 0, variance 1, incorporating ties via averaging)
+- $s_{\mathrm{noise}}$ = standardized ranks from a random permutation (independent, mean 0, variance 1)
 
-**Derivation of exact Pearson correlation:** Let \(X = s_x\), \(Z = s_{\mathrm{noise}}\) (independent, \(\mathrm{E}[X]=\mathrm{E}[Z]=0\), \(\mathrm{Var}(X)=\mathrm{Var}(Z)=1\)). Then \(B = \rho X + \sqrt{1-\rho^2} Z\):
+**Derivation of exact Pearson correlation:** Let $X = s_x$, $Z = s_{\mathrm{noise}}$ (independent, $\mathrm{E}[X]=\mathrm{E}[Z]=0$, $\mathrm{Var}(X)=\mathrm{Var}(Z)=1$). Then $B = \rho X + \sqrt{1-\rho^2} Z$:
 
-\[
+$$
 \mathrm{Var}(B) = \rho^2 \mathrm{Var}(X) + (1-\rho^2) \mathrm{Var}(Z) + 2\rho\sqrt{1-\rho^2}\,\mathrm{Cov}(X,Z) = \rho^2 + (1-\rho^2) = 1
-\]
+$$
 
-\[
+$$
 \mathrm{Cov}(X, B) = \rho\,\mathrm{Var}(X) + \sqrt{1-\rho^2}\,\mathrm{Cov}(X,Z) = \rho
-\]
+$$
 
-\[
+$$
 \mathrm{Corr}(X, B) = \frac{\mathrm{Cov}(X,B)}{\sqrt{\mathrm{Var}(X)\,\mathrm{Var}(B)}} = \rho
-\]
+$$
 
-This holds purely from covariance algebra — no assumption is required that \(X\) and \(s_{\mathrm{noise}}\) come from the same distribution, only that they are independent with mean 0 and variance 1.
+This holds purely from covariance algebra — no assumption is required that $X$ and $s_{\mathrm{noise}}$ come from the same distribution, only that they are independent with mean 0 and variance 1.
 
-The final Spearman \(\rho_s\) is the Pearson correlation of the ranks of x and the reordered y. With no ties, this would equal \(\rho_{\mathrm{cal}}\) (ranks are monotone transforms). With heavy ties in x, midranks compress the effective variance/resolution of \(s_x\) (large blocks of identical values), so the mapping from the finely resolved mixed ranks back to the clumped ranks of x attenuates the realised Spearman below \(\rho_{\mathrm{cal}}\).
+The final Spearman $\rho_s$ is the Pearson correlation of the ranks of x and the reordered y. With no ties, this would equal $\rho_{\mathrm{cal}}$ (ranks are monotone transforms). With heavy ties in x, midranks compress the effective variance/resolution of $s_x$ (large blocks of identical values), so the mapping from the finely resolved mixed ranks back to the clumped ranks of x attenuates the realised Spearman below $\rho_{\mathrm{cal}}$.
 
-Approximate attenuation factor: \(\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}\), where \(m_j\) are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in \(\rho_{\mathrm{cal}}\), which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
+Approximate attenuation factor: $\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}$, where $m_j$ are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in $\rho_{\mathrm{cal}}$, which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
 
 All rank-based simulation methods (including full Iman-Conover) face similar attenuation with heavy ties; the calibration step ensures the realised Spearman matches the target within tolerance (typically < 0.01 bias).
 
