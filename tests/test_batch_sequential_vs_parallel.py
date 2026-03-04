@@ -7,9 +7,9 @@ count is set correctly before import). If T_par > T_seq, we've confirmed that
 most of the huge gap is joblib overhead / no benefit, not nested parallelism.
 
 Usage:
-  python tests/verify_big_gap.py --compare   # run both, print comparison
-  python tests/verify_big_gap.py --seq      # run sequential (default Numba), print TIME=
-  python tests/verify_big_gap.py --par      # run parallel (call with NUMBA_NUM_THREADS=1)
+  python tests/test_batch_sequential_vs_parallel.py --compare   # run both, print comparison
+  python tests/test_batch_sequential_vs_parallel.py --seq      # run sequential (default Numba), print TIME=
+  python tests/test_batch_sequential_vs_parallel.py --par      # run parallel (call with NUMBA_NUM_THREADS=1)
 """
 import os
 import sys

@@ -167,7 +167,7 @@ result = run_single(case=3, n_distinct=4, dist_type="heavy_center", n_sims=500)
 result = run_single(case=3, freq=[19, 18, 18, 18], power_only=True, verbose=False)
 
 # Accuracy testing
-from tests.test_simulation_accuracy import main as test_accuracy
+from tests.test_calibration_accuracy import main as test_accuracy
 df = test_accuracy(n_sims=50, cases=[3], custom_freq=[(3, [19, 18, 18, 18])])
 ```
 
@@ -245,27 +245,43 @@ Test whether generators achieve the target Spearman rho:
 
 ```bash
 # Quick check on worst-case scenario
-python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+python tests/test_calibration_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 
 # Full sweep, all generators
-python tests/test_simulation_accuracy.py --n-sims 200
+python tests/test_calibration_accuracy.py --n-sims 200
 
 # Specific generators only (empirical requires digitized data)
-python tests/test_simulation_accuracy.py --generators nonparametric,copula --n-sims 100
+python tests/test_calibration_accuracy.py --generators nonparametric,copula --n-sims 100
 
-python tests/test_simulation_accuracy.py --generators empirical --case 3 --n-sims 100
+python tests/test_calibration_accuracy.py --generators empirical --case 3 --n-sims 100
 
 # Custom frequency distribution (requires --case; counts must sum to case's n)
-python tests/test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
+python tests/test_calibration_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
 
 # Save results to CSV
-python tests/test_simulation_accuracy.py --n-sims 200 --outfile accuracy_report.csv
+python tests/test_calibration_accuracy.py --n-sims 200 --outfile accuracy_report.csv
 
 # Calibration mode (multipoint default, single for faster runs)
-python tests/test_simulation_accuracy.py --n-sims 200 --calibration-mode single
+python tests/test_calibration_accuracy.py --n-sims 200 --calibration-mode single
 ```
 
 The script flags scenarios where |mean_simulated_rho - target_rho| > 0.01 (configurable via `--threshold`). With default n_sims=50–200, some flags may be Monte Carlo noise. To get all scenarios to pass, you may need to increase `--n-sims` to 1000, 5000, or 10000 depending on the tie structure and threshold.
+
+### Test suite
+
+Run all core tests (fast, ~1-2 min). Calibration runs without strict by default (reports flags only):
+
+    python tests/run_tests.py
+
+Run with calibration strict (exit 1 if any scenario is flagged):
+
+    python tests/run_tests.py --strict
+
+Run all tests including slower parallelism benchmarks:
+
+    python tests/run_tests.py --full
+
+Add `--strict` to either command to run the calibration test in strict mode (exit 1 if any scenario is flagged).
 
 ## Output
 
@@ -298,10 +314,11 @@ Results are saved to the `results/` directory:
 - `benchmark_ci_bootstrap.py` — CI: multipoint vs single calibration
 
 **tests/** — Validation and verification
-- `test_simulation_accuracy.py` — Generator accuracy testing
-- `validation_test_spearman2d.py` — Spearman 2D vs reference
-- `validate_batch_ci_three_steps.py` — Batch CI bit-identical and timing
-- `verify_big_gap.py`, `verify_nested_parallelism.py` — Parallelism verification
+- `test_calibration_accuracy.py` — Calibration accuracy testing
+- `test_spearman_2d.py` — Spearman 2D vs reference
+- `test_batch_bootstrap_ci.py` — Batch CI bit-identical and timing
+- `test_nested_parallelism.py`, `test_batch_sequential_vs_parallel.py` — Parallelism verification
+- `run_tests.py` — Test runner (quick/full, optional --strict for calibration)
 
 Run all commands from the **project root** (e.g. `python scripts/run_simulation.py`).
 
@@ -315,7 +332,7 @@ The Gaussian copula assumes continuous marginals for the rank-to-normal-to-rank 
 
 With tied x-values, the midrank representation has lower variance than distinct ranks. This means the rank-mixing formula `mixed = rho * s_x + sqrt(1-rho^2) * s_noise` produces a Spearman rho slightly below the target rho. The calibration step computes a rho-independent attenuation ratio by probing at a fixed rho (0.30) and using bisection over 300 samples. This ratio is then multiplied by any target rho to compensate for the attenuation. The ratio is cached per (n, k, dist_type), so the cost is ~3s per unique tie structure.
 
-**If calibration fails for a custom tie structure:** Run `tests/test_simulation_accuracy.py` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
+**If calibration fails for a custom tie structure:** Run `tests/test_calibration_accuracy.py` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
@@ -427,7 +444,7 @@ Timings below are **averages across multiple runs** (earlier range data and a si
 - **Batch bootstrap + joblib:** With batch bootstrap, **parallel is often slower than sequential**. Reasons: (1) **Joblib overhead** — process spawn, serialization, and scheduling cost is a large fraction of the per-scenario time (~1.8s) for batch, so parallel adds net cost. (2) **Nested parallelism** — joblib spawns N workers; each worker runs Numba’s `prange` (default 4 threads), so 4×4 = 16 threads on 4 cores cause oversubscription. Most of the “parallel slower than sequential” gap (~89%) is joblib; ~11% is from Numba thread contention.
 - **Per-rep bootstrap + joblib:** Per-rep has many short Numba bursts per scenario, so joblib’s overhead is better amortized; parallel typically beats sequential for per-rep bootstrap.
 - **Memory:** Batch bootstrap allocates ~64 MB per scenario at 200×1000 (n_reps×n_boot); at 10k×1k, ~3.2 GB per scenario. Sequential runs one scenario at a time (peak ~3–4 GB on a 32 GB machine). With `n_jobs=-1`, multiple workers can spike total memory and trigger `TerminatedWorkerError` on memory-constrained systems; use `n_jobs=1` for batch bootstrap or limit workers (e.g. `n_jobs=2`).
-- **Validation:** Batch and per-rep bootstrap are bit-identical for the same data and bootstrap indices. See `tests/validate_batch_ci_three_steps.py`, `tests/verify_nested_parallelism.py`, and `tests/verify_big_gap.py` (and `docs/BENCHMARKING_FINDINGS.md`) to reproduce.
+- **Validation:** Batch and per-rep bootstrap are bit-identical for the same data and bootstrap indices. See `tests/test_batch_bootstrap_ci.py`, `tests/test_nested_parallelism.py`, and `tests/test_batch_sequential_vs_parallel.py` (and `docs/BENCHMARKING_FINDINGS.md`) to reproduce.
 
 ### Typical runtimes (nonparametric generator, 4-logical-core machine)
 
@@ -503,7 +520,7 @@ python benchmarks/benchmark_ci_bootstrap.py
 python benchmarks/benchmark_power.py
 ```
 
-See `docs/BENCHMARKING_FINDINGS.md` for detailed results, decomposition of joblib vs Numba overhead, nested parallelism, memory notes, and verification scripts in `tests/` (`validate_batch_ci_three_steps.py`, `verify_nested_parallelism.py`, `verify_big_gap.py`).
+See `docs/BENCHMARKING_FINDINGS.md` for detailed results, decomposition of joblib vs Numba overhead, nested parallelism, memory notes, and verification scripts in `tests/` (`test_batch_bootstrap_ci.py`, `test_nested_parallelism.py`, `test_batch_sequential_vs_parallel.py`).
 
 ## Cloud Deployment
 

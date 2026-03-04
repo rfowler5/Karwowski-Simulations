@@ -181,3 +181,6 @@ print(f"  vectorize=False: power = {pw_scalar:.4f}")
 print(f"  difference: {abs(pw_vec - pw_scalar):.4f} (expect small for same seed)")
 
 print("\nDone.")
+if not ok1:
+    print("FAIL: Step 1 (bit-identical) failed.")
+    sys.exit(1)

@@ -13,23 +13,23 @@ Typical runtimes:
 
 Programmatic usage
 ------------------
-    from test_simulation_accuracy import main
+    from test_calibration_accuracy import main
     df = main(n_sims=50, cases=[3], n_distinct_values=[4])
     df = main(n_sims=50, cases=[3], custom_freq=[(3, [19, 18, 18, 18])])
 
 CLI usage
 ---------
 Quick check (few sims, worst-case scenario):
-    python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+    python tests/test_calibration_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 
 Full sweep:
-    python tests/test_simulation_accuracy.py --n-sims 200
+    python tests/test_calibration_accuracy.py --n-sims 200
 
 Custom frequency distribution:
-    python tests/test_simulation_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
+    python tests/test_calibration_accuracy.py --case 3 --freq 19,18,18,18 --n-sims 50
 
 Specific generators:
-    python tests/test_simulation_accuracy.py --generators copula,nonparametric
+    python tests/test_calibration_accuracy.py --generators copula,nonparametric
 """
 
 import sys
@@ -351,6 +351,8 @@ if __name__ == "__main__":
                         help="Save results to CSV")
     parser.add_argument("--threshold", type=float, default=0.01,
                         help="Flagging threshold (default: 0.01)")
+    parser.add_argument("--strict", action="store_true",
+                        help="Exit with code 1 if any scenario is flagged")
     args = parser.parse_args()
 
     gens = _parse_list(args.generators) if args.generators else None
@@ -371,8 +373,10 @@ if __name__ == "__main__":
             parser.error(f"--freq sums to {n_sum}; no case in {cases_arg} has that n")
         custom_freq_arg = [(matching[0], freq_list)]
 
-    main(n_sims=args.n_sims, generators=gens, rho_targets=rhos,
-         cases=cases_arg, n_distinct_values=nvals, dist_types=dtypes,
-         custom_freq=custom_freq_arg, seed=args.seed, threshold=args.threshold,
-         outfile=args.outfile, n_cal=args.n_cal,
-         calibration_mode=args.calibration_mode)
+    df = main(n_sims=args.n_sims, generators=gens, rho_targets=rhos,
+              cases=cases_arg, n_distinct_values=nvals, dist_types=dtypes,
+              custom_freq=custom_freq_arg, seed=args.seed, threshold=args.threshold,
+              outfile=args.outfile, n_cal=args.n_cal,
+              calibration_mode=args.calibration_mode)
+    if args.strict and df["flagged"].any():
+        sys.exit(1)

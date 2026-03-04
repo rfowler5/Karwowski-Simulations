@@ -79,10 +79,10 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 | `scripts/run_single_scenario.py` | Single-scenario power/CI; supports `--freq` for custom distributions |
 | `scripts/warm_up_numba.py` | Pre-compiles Numba JIT functions (~5–15s first run, cached thereafter) |
 | **tests/** | |
-| `tests/validation_test_spearman2d.py` | Validates Numba vs NumPy fallback produce identical results |
-| `tests/test_simulation_accuracy.py` | Validates generators achieve target rho; flags \|diff\| > 0.01 |
-| `tests/validate_batch_ci_three_steps.py` | Batch CI bit-identical and timing checks |
-| `tests/verify_big_gap.py`, `tests/verify_nested_parallelism.py` | Parallelism verification |
+| `tests/test_spearman_2d.py` | Validates Numba vs NumPy fallback produce identical results |
+| `tests/test_calibration_accuracy.py` | Validates generators achieve target rho; flags \|diff\| > 0.01 |
+| `tests/test_batch_bootstrap_ci.py` | Batch CI bit-identical and timing checks |
+| `tests/test_batch_sequential_vs_parallel.py`, `tests/test_nested_parallelism.py` | Parallelism verification |
 
 ---
 
@@ -124,7 +124,7 @@ python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_
 python scripts/run_single_scenario.py --case 3 --freq 19,18,18,18 --n-sims 500
 
 # Accuracy test
-python tests/test_simulation_accuracy.py --n-sims 50 --case 3 --n-distinct 4
+python tests/test_calibration_accuracy.py --n-sims 50 --case 3 --n-distinct 4
 # Reference config (calibration seed 99, floor): --n-sims 4000 --n-cal 700 --generators nonparametric
 # Calibration mode: --calibration-mode multipoint (default) or --calibration-mode single
 

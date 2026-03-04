@@ -152,11 +152,11 @@ Get-Process python* | Stop-Process -Force
 
 | Script | Purpose |
 |--------|---------|
-| `validate_batch_ci_three_steps.py` | (1) Bit-identical test: batch vs old path, same data & bootstrap indices. (2) Sequential Numba=1: batch faster than old. (3) Batch path parallel vs sequential; (3b) old path parallel vs sequential. Optional: power sim vectorized vs scalar. Uses small n_reps/n_boot. |
-| `verify_nested_parallelism.py` | Isolates nested parallelism: runs same workload (batch, n_jobs=-1) in two processes — default Numba threads vs `NUMBA_NUM_THREADS=1`. Use `--compare`. Confirmed default 4–11% slower across three runs. |
-| `verify_big_gap.py` | Compares batch sequential (default Numba) vs batch parallel (Numba=1) in separate processes. Use `--compare`. Shows whether the “large gap” is joblib vs nested parallelism. |
+| `test_batch_bootstrap_ci.py` | (1) Bit-identical test: batch vs old path, same data & bootstrap indices. (2) Sequential Numba=1: batch faster than old. (3) Batch path parallel vs sequential; (3b) old path parallel vs sequential. Optional: power sim vectorized vs scalar. Uses small n_reps/n_boot. |
+| `test_nested_parallelism.py` | Isolates nested parallelism: runs same workload (batch, n_jobs=-1) in two processes — default Numba threads vs `NUMBA_NUM_THREADS=1`. Use `--compare`. Confirmed default 4–11% slower across three runs. |
+| `test_batch_sequential_vs_parallel.py` | Compares batch sequential (default Numba) vs batch parallel (Numba=1) in separate processes. Use `--compare`. Shows whether the “large gap” is joblib vs nested parallelism. |
 
-**Validation result:** Bit-identical test (Step 1 of `validate_batch_ci_three_steps.py`) passes: `max |batch - old| = 0` over bootstrap rho matrix when both paths get the same data and bootstrap index order.
+**Validation result:** Bit-identical test (Step 1 of `test_batch_bootstrap_ci.py`) passes: `max |batch - old| = 0` over bootstrap rho matrix when both paths get the same data and bootstrap index order.
 
 ---
 
@@ -191,7 +191,7 @@ Get-Process python* | Stop-Process -Force
 
 5. **Config:** Document `BATCH_CI_BOOTSTRAP` in config (default True). `VECTORIZE_DATA_GENERATION` must be True for batch path.
 
-6. **Validation/verification:** Mention `validate_batch_ci_three_steps.py`, `verify_nested_parallelism.py`, and `verify_big_gap.py` for reproducing findings (see this doc).
+6. **Validation/verification:** Mention `test_batch_bootstrap_ci.py`, `test_nested_parallelism.py`, and `test_batch_sequential_vs_parallel.py` for reproducing findings (see this doc).
 
 ---
 

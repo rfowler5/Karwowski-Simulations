@@ -3,10 +3,10 @@ Verify that nested parallelism (joblib + Numba both parallel) causes the batch-p
 slowdown when using n_jobs=-1.
 
 Run once: prints time for batch path with n_jobs=-1 using current NUMBA_NUM_THREADS.
-  python tests/verify_nested_parallelism.py
+  python tests/test_nested_parallelism.py
 
 Run comparison: spawns two processes (default Numba threads vs Numba=1), same workload.
-  python tests/verify_nested_parallelism.py --compare
+  python tests/test_nested_parallelism.py --compare
 
 If nested parallelism is the issue, (default threads) should be significantly slower
 than (Numba=1) when both use n_jobs=-1.
