@@ -124,6 +124,15 @@ Requires `data/digitized.py` (see [Digitized data](#digitized-data) below). Use 
 
 Closed-form formulas (no simulation). Power uses the non-central t-distribution with df = n-2; CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)). Ties are handled via the Fieller-Hartley-Pearson variance correction throughout (see [Tie correction](#tie-correction-fieller-hartley-pearson) below). Fast and stable, serves as a cross-check against the Monte Carlo methods.
 
+### P-value method (power simulation)
+
+Power simulation uses **permutation-based p-values** instead of the t-approximation, because the t-approximation is unreliable with heavy ties. Two paths:
+
+- **Non-empirical generators** (nonparametric, copula, linear): A **precomputed null** distribution of Spearman rhos is built once per (n, tie structure) and cached. P-values are computed by binary search against sorted |null_rho|. On first use for a scenario (~1s for n≈80, 50k null samples), the null is built and cached; subsequent calls reuse it. Optional: call `permutation_pvalue.warm_precomputed_null_cache()` to pre-build nulls for all scenarios before long runs.
+- **Empirical generator:** Y may have ties that vary per dataset, so a single precomputed null is not applicable. The code uses **per-dataset Monte Carlo** permutation p-values with adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba. When n_sims exceeds a threshold (default 5k), sims are processed in chunks (default 2k) to cap memory (see [Memory (Monte Carlo p-value)](#memory-monte-carlo-p-value-batching) below).
+
+Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for power (e.g. for comparison or tests).
+
 ## Digitized data (for empirical generator)
 
 The **empirical** generator uses digitized H-Al and B-Al values from the Karwowski scatterplot: the 71 digitized values are fixed in every dataset; only the remainder is resampled per sim/rep (see Empirical generator above). The values in `data/digitized.py` were obtained using [WebPlotDigitizer v4](https://automeris.io/WebPlotDigitizer/). To use the empirical generator yourself, create `data/digitized.py` with arrays `H_AL71`, `B_AL71`, `H_AL_OUTLIER`, `B_AL_OUTLIER_MIN`, `B_AL_OUTLIER_MAX` (see the module docstring in `data_generator.py` for details). If `data/digitized.py` is missing or fails to import, a warning is emitted: when only empirical was selected it falls back to nonparametric; when multiple generators were selected empirical is skipped. Use `--skip-empirical` to avoid the warning when you do not have digitized data.
@@ -408,11 +417,41 @@ python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_
 - **Batch bootstrap** — `config.BATCH_CI_BOOTSTRAP` (default True): CI generates all n_reps datasets and n_boot resamples in one batch, then computes Spearman across all bootstrap samples in a single Numba call. Requires `VECTORIZE_DATA_GENERATION=True`. Gives ~2.5× sequential speedup over per-rep bootstrap; see [Benchmark data](#benchmark-data-ci-bootstrap) below.
 - **Scenario-level parallelization** — **joblib** (`--n-jobs`) farms scenarios out across cores. **Caveat:** With **batch bootstrap**, parallel (`n_jobs=-1`) is often *slower* than sequential (`n_jobs=1`) due to joblib overhead and nested parallelism with Numba; see [Parallelization and Numba caveats](#parallelization-and-numba-caveats) below.
 
-These flags live in `config.py`: `VECTORIZE_DATA_GENERATION`, `BATCH_CI_BOOTSTRAP`, and `CALIBRATION_MODE` (multipoint vs single).
+These flags live in `config.py`: `VECTORIZE_DATA_GENERATION`, `BATCH_CI_BOOTSTRAP`, `CALIBRATION_MODE` (multipoint vs single), and `USE_PERMUTATION_PVALUE` (permutation vs t-based p-value for power).
 
 **Calibration:** Uses a rho-independent attenuation ratio cached per (n, k, dist_type). The calibration cost is paid **once per tie structure**, not once per rho value tested during bisection — eliminating the dominant bottleneck of the original implementation (~60× speedup for power estimation).
 
-**Other optimisations:** `_fit_lognormal` results are LRU-cached; x-value templates are cached and only shuffled per call; a fast inline Spearman (Pearson-of-ranks + t-distribution p-value) replaces the full `scipy.stats.spearmanr` in the power estimation loop.
+**Other optimisations:** `_fit_lognormal` results are LRU-cached; x-value templates are cached and only shuffled per call. Power simulation uses permutation-based p-values (precomputed null or batched Monte Carlo) when `USE_PERMUTATION_PVALUE=True`; see [P-value method (power simulation)](#p-value-method-power-simulation).
+
+### Memory (Monte Carlo p-value batching)
+
+When using the **Monte Carlo p-value path** (empirical generator, or any generator with permutation enabled), peak memory is dominated by: (1) permutation indices `perm_idx_all` of shape (n_perm, n_sims, n) int32 → 4 × n_perm × n_sims × n bytes; (2) permutation rhos (n_sims, n_perm) float64 → 8 × n_sims × n_perm bytes. Data `x_all`, `y_all` are smaller by comparison.
+
+**Formula:** Extra memory ≈ (4n + 8) × n_sims_chunk × n_perm bytes. For n ≈ 80: ≈ 328 × n_sims_chunk × n_perm bytes (e.g. 10k sims × 1k perms at n≈80 ≈ 3.3 GB for a full batch).
+
+**Chunking:** When n_sims > `PVALUE_N_SIMS_BATCH_THRESHOLD` (default 5k), sims are processed in chunks of `PVALUE_N_SIMS_CHUNK_SIZE` (default 2k). Peak memory is then for one chunk: e.g. 2k sims × 1k n_perm × n≈80 → ~660 MB per chunk.
+
+**Example table (n ≈ 80):**
+
+| n_sims | n_perm | Mode    | Peak extra memory |
+|--------|--------|---------|-------------------|
+| 500    | 1k     | full    | ~130 MB           |
+| 2k     | 1k     | full    | ~525 MB           |
+| 5k     | 1k     | full    | ~1.6 GB           |
+| 10k    | 1k     | chunked | ~660 MB per chunk |
+| 50k    | 1k     | chunked | ~660 MB per chunk |
+| 5k     | 2k     | full    | ~3.3 GB           |
+
+### Precision formulas
+
+For user-computed errors and planning n_sims / n_cal:
+
+- **Power estimate (binomial):** \(\hat{p}\) = proportion of sims with p < α. \(\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}\). For power near 0.80, \(\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}\).
+- **Bisection contribution to SE(min ρ):** \(\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}\) with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb \(\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}\).
+- **Calibration contribution:** Calibration uncertainty scales as \(1/\sqrt{n_{\mathrm{cal}}}\); propagates to min detectable ρ. \(\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}\) (coefficient depends on scenario).
+- **Combined uncertainty (independent):** \(\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }\).
+- **95% CI half-width:** Half-width ≈ 1.96 × \(\mathrm{SE}_{\mathrm{total}}(\rho)\). For target half-width w, aim for \(\mathrm{SE}_{\mathrm{total}} \leq w / 1.96\).
+- **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
 
 ### Benchmark data (CI bootstrap)
 

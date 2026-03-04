@@ -1,6 +1,6 @@
 ---
 name: Methods documentation for statisticians
-overview: Add a clear, verification-oriented description of all implemented statistical methods to the README (and optionally code comments) so statisticians and simulation experts can check validity. This includes (1) exact test/power/CI formulas and the unverified sqrt(1/1.06) and t-based p-value caveat, (2) method-by-method descriptions of what the code does for linear, copula, empirical, nonparametric, and asymptotic—filling gaps where currently missing (e.g. linear, copula), and (3) empirical-generator decisions for p-value and calibration (new y per sim, single reference pool, per-dataset permutation for empirical) and the alternative "generate new y datasets each time" as a future generalization.
+overview: Add a clear, verification-oriented description of all implemented statistical methods to the README (and optionally code comments) so statisticians and simulation experts can check validity. This includes (1) exact test/power/CI/p-value formulas—covering the default permutation-based p-values (precomputed null and per-dataset MC) and the fallback t-approximation—plus the unverified sqrt(1/1.06) caveat, (2) method-by-method descriptions of what the code does for linear, copula, empirical, nonparametric, and asymptotic—filling gaps where currently missing (e.g. linear, copula), and (3) empirical-generator decisions for p-value and calibration (new y per sim, single reference pool, per-dataset permutation for empirical) and the alternative "generate new y datasets each time" as a future generalization.
 todos: []
 isProject: false
 ---
@@ -11,8 +11,8 @@ isProject: false
 
 Report **exactly** what formulas and choices the code implements so statisticians can verify correctness. This is documentation-only; no change to whether methods are "valid" — just make them explicit. Key gaps from the past chat:
 
-- **Asymptotic power:** An extra factor `sqrt(1/1.06)` is applied to the noncentrality parameter in [power_asymptotic.py](power_asymptotic.py) (line 135). Bonett–Wright (2000) only justify 1.06 for **Fisher z SE (CIs)**; no literature was found supporting this factor in the **power** (noncentral t) formula. This should be stated clearly so reviewers can confirm or reject it.
-- **Monte Carlo power p-value:** The power simulation uses a **t-approximation** p-value ([spearman_helpers.spearman_rho_pvalue_2d](spearman_helpers.py)), not permutation. With heavy ties the t-approximation is not reliable (can be anticonservative). The README does not currently state this explicitly or give the exact formula.
+- **Asymptotic power:** An extra factor `sqrt(1/1.06)` is applied to the noncentrality parameter in [power_asymptotic.py](power_asymptotic.py) (`asymptotic_power`, tie-correction branch). Bonett–Wright (2000) only justify 1.06 for **Fisher z SE (CIs)**; no literature was found supporting this factor in the **power** (noncentral t) formula. This should be stated clearly so reviewers can confirm or reject it.
+- **Monte Carlo power p-value:** The power simulation now uses **permutation-based p-values** by default (`config.USE_PERMUTATION_PVALUE = True`): a precomputed null for non-empirical generators and per-dataset Monte Carlo permutation for the empirical generator. The **t-approximation** p-value ([spearman_helpers.spearman_rho_pvalue_2d](spearman_helpers.py)) is retained as a fallback (when `USE_PERMUTATION_PVALUE = False`). With heavy ties the t-approximation is unreliable (can be anticonservative), which motivated the switch to permutation. The README's "P-value method" section documents this but the exact formulas for both paths are not yet in one place for verification.
 
 ---
 
@@ -27,12 +27,15 @@ Report **exactly** what formulas and choices the code implements so statistician
 - **Hypothesis and test**
   - H0: ρ = 0 vs H1: ρ ≠ 0, two-sided, α = 0.05.
   - Test statistic used in both asymptotic power and in the Monte Carlo power loop (see below).
-- **Test statistic and p-value (current implementation)**
-  - **Formula:** t = \rho \sqrt{(n-2)/(1-\rho^2)} with df = n − 2; two-sided p-value = 2 × P(T ≥ |t|) for T ~ t_{n-2}.
-  - **Where used:**
-    - **Monte Carlo power:** Each simulated dataset (x, y) gets one Spearman ρ and one p-value from this t-approximation ([spearman_helpers.spearman_rho_pvalue_2d](spearman_helpers.py), lines 215–216). Power = proportion of sims with p < α.
-    - **Asymptotic power:** Same t-statistic; power is computed via the non-central t distribution (below).
-  - **Caveat:** This p-value is the **t-approximation** for testing ρ = 0. With **heavy ties** in x (e.g. few distinct values), the null distribution of ρ is not well approximated by the t-formula; the approximation can be anticonservative (p-values too small, type I error inflated). For tied scenarios, a permutation-based p-value would be appropriate; the code currently uses the t-approximation everywhere (permutation is planned elsewhere).
+- **P-value methods for Monte Carlo power**
+  - **Default: permutation-based p-values** (`config.USE_PERMUTATION_PVALUE = True`). Two paths:
+    - **Precomputed null** (non-empirical generators: nonparametric, copula, linear): Build once per (n, tie structure): generate `n_pre` (default 50,000) random permutations of y-ranks (1…n) while keeping x-midranks fixed; compute Spearman ρ for each → sort |null_ρ|. P-value for observed |ρ_obs|: p = (1 + #{|null_ρ| ≥ |ρ_obs|}) / (1 + n_pre), using binary search against the sorted array. Cached and reused across all sims in a scenario. See [permutation_pvalue.get_precomputed_null](permutation_pvalue.py) and `pvalues_from_precomputed_null`.
+    - **Per-dataset Monte Carlo** (empirical generator, where y can have ties that vary per dataset): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman ρ for each, and p = (1 + #{|perm_ρ| ≥ |ρ_obs|}) / (1 + n_perm). Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See [permutation_pvalue.pvalues_mc](permutation_pvalue.py).
+  - Power = proportion of sims with p < α.
+  - **Fallback: t-approximation p-value** (`config.USE_PERMUTATION_PVALUE = False`):
+    - **Formula:** t = ρ √((n-2)/(1-ρ²)) with df = n − 2; two-sided p-value = 2 × P(T ≥ |t|) for T ~ t_{n-2}. See [spearman_helpers.spearman_rho_pvalue_2d](spearman_helpers.py).
+    - **Where also used:** The **asymptotic power** formula uses the same t-statistic concept to derive the noncentrality parameter (below).
+    - **Caveat:** The t-approximation is unreliable with **heavy ties** in x (few distinct values); the null distribution of ρ is not well approximated by the t-formula, and the approximation can be anticonservative (p-values too small, type I error inflated). This is why permutation is the default. The t-approximation remains available for comparison or backward compatibility.
 - **Asymptotic power (non-central t)**
   - **Formula (all-distinct):** Noncentrality nc = \rho_{\mathrm{true}} \sqrt{n-2} / \sqrt{1 - \rho_{\mathrm{true}}^2}. Power = P(|T| > t_crit) for T ~ noncentral t(df = n−2, nc).
   - **Tie adjustment (FHP):** When ties are present, nc is scaled by \sqrt{\mathrm{var}_0^{\mathrm{noties}} / \mathrm{var}_0^{\mathrm{ties}}} (see FHP below).
@@ -50,6 +53,7 @@ Report **exactly** what formulas and choices the code implements so statistician
 
 - **"Why non-central t for power?"** and **"Why Bonett–Wright SE?"**: Keep them; add a sentence in each pointing to the new "Implemented methods" section for the exact formulas and the note on 1.06 in power.
 - **"Tie correction (Fieller–Hartley–Pearson)"**: Keep; ensure the FHP formula here matches the new section (or the new section points to this). **Add** that the asymptotic power and CI apply FHP **for x only** (not y): only the x tie structure is used; y is treated as no ties in the asymptotic formulas. This should be stated in the README so readers know we do not use y_counts there.
+- **"P-value method (power simulation)"**: The README already has this section documenting permutation as the default and the two paths (precomputed null, per-dataset MC). Cross-link to the new "Statistical formulas" section for the exact formulas (precomputed null construction, binary-search p-value, MC p-value, and the fallback t-approximation formula). No major rewrite needed — just ensure the formulas section has all the detail and the existing section refers to it.
 - **Asymptotic subsection** under "Four Monte Carlo Methods (plus Asymptotic)": State explicitly that asymptotic power uses the non-central t with FHP and the 1.06 factor as above, and refer to the verification section for details.
 - **Bootstrap: separate RNG streams:** The README already has a subsection **"Separate RNG streams for data and bootstrap"** under Bootstrap CI that explains why data generation and bootstrap resampling use separate RNG streams (`np.random.SeedSequence.spawn(2)`): a shared RNG would advance by `n_boot * n` draws per rep, so the n_reps datasets would depend on `n_boot`, making results non-comparable across `n_boot` and invalidating "more bootstraps = more accurate." **Retain** this subsection and its reasoning. If a new "Statistical formulas" or verification section is added, it may briefly reference it (e.g. "Bootstrap uses separate streams so the same seed yields the same n_reps datasets regardless of n_boot; see Bootstrap CI.").
 
@@ -57,8 +61,8 @@ Report **exactly** what formulas and choices the code implements so statistician
 
 ## 3. Optional: code comments
 
-- **[power_asymptotic.py](power_asymptotic.py) line 135:** Add a one-line comment: e.g. "Scale nc by sqrt(1/1.06); 1.06 is from Bonett–Wright for Fisher z (CI). Not verified in literature for power; see README."
-- **[spearman_helpers.py](spearman_helpers.py) spearman_rho_pvalue_2d:** In the docstring, add one sentence: "Uses the t-approximation for testing ρ=0; with heavy ties a permutation p-value is more appropriate (see README)."
+- **[power_asymptotic.py](power_asymptotic.py) `asymptotic_power`, tie-correction branch:** Add a one-line comment: e.g. "Scale nc by sqrt(1/1.06); 1.06 is from Bonett–Wright for Fisher z (CI). Not verified in literature for power; see README."
+- **[spearman_helpers.py](spearman_helpers.py) `spearman_rho_pvalue_2d`:** In the docstring, add one sentence: "Uses the t-approximation for testing ρ=0; with heavy ties a permutation p-value is more appropriate and is now the default (see config.USE_PERMUTATION_PVALUE and README)."
 
 ---
 
@@ -105,7 +109,7 @@ A different design would be to treat the **pool as the population** and, each si
 
 ## 6. What this plan does not do
 
-- Does **not** implement permutation p-values or change the power/CI logic.
+- Does **not** change the power/CI logic or the permutation p-value implementation. Permutation p-values are already implemented and are the default; this plan only **documents** their formulas.
 - Does **not** remove or add the sqrt(1/1.06) factor; it only **documents** it and its verification status.
 - Does **not** duplicate the full permutation p-value implementation plan; that remains in [plans/permutation_pvalue_implementation_plan.md](plans/permutation_pvalue_implementation_plan.md).
 
@@ -113,10 +117,10 @@ A different design would be to treat the **pool as the population** and, each si
 
 ## 7. Deliverables
 
-1. **README — Statistical formulas:** New section "Statistical formulas (for statistician verification)" (or equivalent) with the content in §1 (including FHP and **tie correction for x only** in the asymptotic formulas), and short cross-links in §2.
+1. **README — Statistical formulas:** New section "Statistical formulas (for statistician verification)" (or equivalent) with the content in §1 — including FHP and **tie correction for x only** in the asymptotic formulas, and the **permutation p-value formulas** (precomputed null construction, binary-search p-value, per-dataset MC p-value) plus the fallback t-approximation formula — and short cross-links in §2.
 2. **README — Method descriptions:** Ensure each of the five methods (nonparametric, copula, linear, empirical, asymptotic) has a clear "what we do" description. Expand **copula** and **linear** (and **empirical** if needed) with the steps and formulas in §4; nonparametric and asymptotic only need cross-links or minor tweaks.
 3. **README — Empirical generator and p-value/calibration:** Add a subsection (under Empirical or a dedicated "Empirical generator and Monte Carlo p-value" subsection) documenting: (a) what we do (new y per sim, single reference pool for calibration, per-dataset permutation p-value for empirical when permutation is implemented); (b) why it is legitimate (averaging over (x,y), calibration mismatch averaged over n_sims); (c) the alternative (treating pool as population and generating new y datasets each time by sampling n from the pool) as answering "what if many such experiments were run?" and as a potential future generalization for other scenarios. Content as in §5.
 4. **README — Bootstrap RNG reasoning:** Ensure the reasoning for **separate RNG streams for data and bootstrap** is present (the README already has "Separate RNG streams for data and bootstrap" under Bootstrap CI; retain it and do not remove or shorten the explanation when editing other sections).
 5. **Optional:** Two code comments (power_asymptotic.py, spearman_helpers.py) as in §3.
 
-After this, statisticians and simulation experts have (a) exact test/power/CI formulas and caveats in one place, (b) a clear account of what each data-generation method does (linear, copula, etc.), (c) explicit notes on what is unverified (1.06 in power) or approximate (t-based p-value with ties), and (d) a clear record of empirical-generator and p-value/calibration decisions and the alternative design for future generalization.
+After this, statisticians and simulation experts have (a) exact test/power/CI/p-value formulas and caveats in one place — including both the default permutation-based p-values and the fallback t-approximation, (b) a clear account of what each data-generation method does (linear, copula, etc.), (c) explicit notes on what is unverified (1.06 in power) or approximate (t-based p-value with ties, now a fallback), and (d) a clear record of empirical-generator and p-value/calibration decisions and the alternative design for future generalization.

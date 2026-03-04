@@ -31,7 +31,11 @@ from joblib import Parallel, delayed
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_SIMS, ALPHA, TARGET_POWER,
                     POWER_SEARCH_DIRECTION, CALIBRATION_MODE,
-                    VECTORIZE_DATA_GENERATION)
+                    VECTORIZE_DATA_GENERATION,
+                    USE_PERMUTATION_PVALUE, N_PERM_DEFAULT, N_PERM_LOW_SIMS,
+                    N_SIMS_THRESHOLD_FOR_N_PERM, PVALUE_PRECOMPUTED_N_PRE,
+                    PVALUE_MC_ON_CACHE_MISS)
+from power_asymptotic import get_x_counts
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
                             calibrate_rho_empirical, digitized_available,
@@ -42,7 +46,11 @@ from data_generator import (generate_cumulative_aluminum, get_generator,
                             generate_y_nonparametric_batch,
                             generate_y_copula_batch,
                             generate_y_linear_batch)
-from spearman_helpers import spearman_rho_pvalue_2d
+from spearman_helpers import spearman_rho_pvalue_2d, spearman_rho_2d
+if USE_PERMUTATION_PVALUE:
+    from permutation_pvalue import (get_precomputed_null, get_cached_null,
+                                    pvalues_from_precomputed_null,
+                                    pvalues_mc, _get_n_perm)
 
 
 def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
@@ -142,7 +150,33 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
             x_all[i] = xi
             y_all[i] = yi
 
-    _, pvals = spearman_rho_pvalue_2d(x_all, y_all, n)
+    if not USE_PERMUTATION_PVALUE:
+        _, pvals = spearman_rho_pvalue_2d(x_all, y_all, n)
+        return np.sum(pvals < alpha) / n_sims
+
+    # Permutation-based p-values
+    if generator != "empirical":
+        x_counts = get_x_counts(n, n_distinct, distribution_type=distribution_type,
+                                all_distinct=all_distinct, freq_dict=freq_dict)
+        if PVALUE_MC_ON_CACHE_MISS:
+            sorted_abs_null = get_cached_null(n, all_distinct, x_counts)
+        else:
+            sorted_abs_null = get_precomputed_null(
+                n, all_distinct, x_counts, n_pre=PVALUE_PRECOMPUTED_N_PRE, rng=rng)
+
+        if sorted_abs_null is not None:
+            # Cache hit: fast binary-search p-values
+            rhos_obs = spearman_rho_2d(x_all, y_all)
+            pvals = pvalues_from_precomputed_null(rhos_obs, sorted_abs_null)
+        else:
+            # Cache miss with PVALUE_MC_ON_CACHE_MISS=True: fall back to MC
+            n_perm = _get_n_perm(n_sims)
+            reject, pvals, rhos_obs = pvalues_mc(x_all, y_all, n_perm, alpha, rng)
+    else:
+        # Empirical: per-dataset Monte Carlo
+        n_perm = _get_n_perm(n_sims)
+        reject, pvals, rhos_obs = pvalues_mc(x_all, y_all, n_perm, alpha, rng)
+
     return np.sum(pvals < alpha) / n_sims
 
 

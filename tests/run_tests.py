@@ -37,6 +37,7 @@ QUICK_TESTS = [
     ("test_reproducibility.py", []),
     ("test_empirical_invalid_n.py", []),
     ("test_empirical_generator.py", []),
+    ("test_permutation_pvalue.py", []),
     ("test_power_sanity.py", []),
     ("test_rng_data_independence.py", []),
 ]

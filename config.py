@@ -252,3 +252,23 @@ CALIBRATION_MODE = "multipoint"
 USE_NUMBA = True
 VECTORIZE_DATA_GENERATION = True
 BATCH_CI_BOOTSTRAP = True
+
+# ---------------------------------------------------------------------------
+# Permutation p-value settings
+# ---------------------------------------------------------------------------
+USE_PERMUTATION_PVALUE = True
+
+N_PERM_DEFAULT = 1000
+N_PERM_LOW_SIMS = 2000
+N_SIMS_THRESHOLD_FOR_N_PERM = 5000
+
+PVALUE_PRECOMPUTED_N_PRE = 50_000
+
+PVALUE_N_SIMS_BATCH_THRESHOLD = 5_000
+PVALUE_N_SIMS_CHUNK_SIZE = 2_000
+
+# When True, use MC permutation p-values instead of building a precomputed null
+# on a cache miss (avoids the ~1s build cost and the memory for the cached null).
+# When False (original behaviour), the null is always built and cached on first access.
+# Has no effect if the null is already in cache (cached null is always used when available).
+PVALUE_MC_ON_CACHE_MISS = False
