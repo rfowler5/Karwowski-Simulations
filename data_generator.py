@@ -200,6 +200,9 @@ def get_pool(n):
     between B_AL_OUTLIER_MIN and B_AL_OUTLIER_MAX.  All random generation
     uses a fixed seed (_POOL_SEED=42) for reproducibility.      Results are
     cached so the pool is identical across calls and runs.
+
+    **Calibration only.** For data generation, use ``build_empirical_pool(n, rng)``
+    which resamples the remainder per call.
     """
     if not _DIGITIZED_AVAILABLE:
         raise ImportError(
@@ -230,15 +233,46 @@ def get_pool(n):
     return pool
 
 
-def generate_y_empirical(x, rho_s, y_params, rng=None, _calibrated_rho=None):
-    """Generate y via rank-mixing with empirical pool resampling.
+def build_empirical_pool(n, rng):
+    """Build an empirical Y pool of size *n*, advancing *rng*.
 
-    Same rank-mixing logic as generate_y_nonparametric, but draws y-marginal
-    values from the empirical pool (via get_pool) instead of a lognormal.
+    Unlike get_pool (which is cached with a fixed seed for calibration),
+    this function is called once per sim/rep so the 'remainder' values
+    (beyond the 71 digitized) vary across replications.
+
+    The 71 digitized values (B_AL71 or H_AL71) appear exactly once.
+    Only the remainder is resampled from the 71 via rng.
+    """
+    if not _DIGITIZED_AVAILABLE:
+        raise ImportError(
+            "Digitized data not available. Create data/digitized.py or use --skip-empirical.")
+    if n == 73:
+        fill = rng.choice(B_AL71, size=2, replace=True)
+        return np.concatenate([B_AL71, fill])
+    elif n == 80:
+        base = build_empirical_pool(73, rng)
+        outliers = generate_b_al_outliers(n_missing=5, rng=rng)
+        return np.concatenate([base, outliers])
+    elif n == 81:
+        fill = rng.choice(H_AL71, size=10, replace=True)
+        return np.concatenate([H_AL71, fill])
+    elif n == 82:
+        base = build_empirical_pool(81, rng)
+        return np.append(base, H_AL_OUTLIER)
+    else:
+        raise ValueError(
+            f"Empirical generator only supports n in {{73, 80, 81, 82}}, got {n}")
+
+
+def generate_y_empirical(x, rho_s, y_params, rng=None, _calibrated_rho=None):
+    """Generate y via rank-mixing with empirical marginal.
+
+    Builds a fresh pool per call via build_empirical_pool: the 71 digitized
+    values appear exactly once, remainder is resampled using rng.
     """
     if rng is None:
         rng = np.random.default_rng()
-    pool = get_pool(len(x))
+    pool = build_empirical_pool(len(x), rng)
     rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
     x_ranks = rankdata(x, method="average")
     return _raw_rank_mix(x_ranks, rho_input, y_params, rng,
@@ -246,16 +280,21 @@ def generate_y_empirical(x, rho_s, y_params, rng=None, _calibrated_rho=None):
 
 
 def generate_y_empirical_batch(x_batch, rho_s, y_params, rng=None,
-                               _calibrated_rho=None, pool=None):
-    """Batch version of generate_y_empirical."""
+                               _calibrated_rho=None):
+    """Batch version of generate_y_empirical.
+
+    Builds a fresh pool per rep via build_empirical_pool (71 digitized
+    values fixed, remainder resampled).  The pool parameter has been
+    removed; callers no longer pass pool for data generation.
+    """
     if rng is None:
         rng = np.random.default_rng()
-    if pool is None:
-        pool = get_pool(x_batch.shape[1])
+    n_reps, n = x_batch.shape
+    pool_batch = np.array([build_empirical_pool(n, rng) for _ in range(n_reps)])
     rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
     x_ranks_batch = _rank_rows(x_batch)
     return _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
-                               marginal="empirical", pool=pool)
+                               marginal="empirical", pool=pool_batch)
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +454,10 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None,
     elif marginal == "empirical":
         if pool is None:
             raise ValueError("pool required for empirical marginal")
-        y_values = rng.choice(pool, size=n, replace=True)
+        if len(pool) != n:
+            raise ValueError(
+                f"For empirical marginal, pool length must equal n={n}, got {len(pool)}")
+        y_values = np.sort(pool)
     else:
         raise ValueError(f"Unknown marginal: {marginal}")
     y_values.sort()
@@ -757,7 +799,7 @@ def _mean_rho_empirical(rho_in, template, pool, n_cal, seed):
         rho_c = np.clip(rho_in, -0.999, 0.999)
         mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
 
-        y_vals = cal_rng.choice(pool, size=nn, replace=True)
+        y_vals = np.sort(pool)
         y_vals.sort()
         y_final = np.empty(nn)
         y_final[np.argsort(mixed)] = y_vals
@@ -968,7 +1010,11 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
     elif marginal == "empirical":
         if pool is None:
             raise ValueError("pool required for empirical marginal")
-        y_values = rng.choice(pool, size=(n_sims, n), replace=True)
+        if pool.ndim != 2 or pool.shape != (n_sims, n):
+            raise ValueError(
+                f"For empirical marginal, pool must be 2D with shape ({n_sims}, {n}), "
+                f"got shape {pool.shape}")
+        y_values = np.sort(pool, axis=1)
     else:
         raise ValueError(f"Unknown marginal: {marginal}")
     y_values.sort(axis=1)

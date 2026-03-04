@@ -284,7 +284,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         elif generator == "empirical":
             y_all = generate_y_empirical_batch(
                 x_all, rho_s, y_params, rng=data_rng,
-                _calibrated_rho=cal_rho, pool=pool)
+                _calibrated_rho=cal_rho)
         else:
             y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng)
 
@@ -325,7 +325,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         elif generator == "empirical":
             y_reps = generate_y_empirical_batch(
                 x_reps, rho_s, y_params, rng=data_rng,
-                _calibrated_rho=cal_rho, pool=pool)
+                _calibrated_rho=cal_rho)
         else:
             y_reps = generate_y_linear_batch(x_reps, rho_s, y_params, rng=data_rng)
 

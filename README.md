@@ -111,7 +111,7 @@ Generates `y = a + b*x + noise` on a log scale, calibrated so that the Pearson c
 
 ### Empirical (Karwowski digitized data)
 
-Uses rank-mixing with **resampling from digitized Karwowski data pools** instead of a log-normal y-marginal. The pools are built from 71 paired (H-Al, B-Al) points digitized from the Karwowski scatterplot, with case and outlier inclusion inferred from sample size *n*:
+Uses rank-mixing with **digitized Karwowski data pools** instead of a log-normal y-marginal. The **71 digitized values** (B-Al and H-Al each have 71) appear **exactly once** in every simulated dataset; only the remainder (2 for n=73, 10 for n=81, plus outliers for 80/82) is resampled per sim/rep. Pool structure: **73 ⊂ 80** (the first 73 elements of an n=80 pool equal the n=73 pool) and **81 ⊂ 82**. Sample sizes:
 
 - **n=73** → B-Al, outliers excluded (71 digitized + 2 resampled)
 - **n=80** → B-Al, full sample (73 clean + 7 outliers)
@@ -126,7 +126,7 @@ Closed-form formulas (no simulation). Power uses the non-central t-distribution 
 
 ## Digitized data (for empirical generator)
 
-The **empirical** generator resamples from digitized H-Al and B-Al values from the Karwowski scatterplot. The values in `data/digitized.py` were obtained using [WebPlotDigitizer v4](https://automeris.io/WebPlotDigitizer/). To use the empirical generator yourself, create `data/digitized.py` with arrays `H_AL71`, `B_AL71`, `H_AL_OUTLIER`, `B_AL_OUTLIER_MIN`, `B_AL_OUTLIER_MAX` (see the module docstring in `data_generator.py` for details). If `data/digitized.py` is missing or fails to import, a warning is emitted: when only empirical was selected it falls back to nonparametric; when multiple generators were selected empirical is skipped. Use `--skip-empirical` to avoid the warning when you do not have digitized data.
+The **empirical** generator uses digitized H-Al and B-Al values from the Karwowski scatterplot: the 71 digitized values are fixed in every dataset; only the remainder is resampled per sim/rep (see Empirical generator above). The values in `data/digitized.py` were obtained using [WebPlotDigitizer v4](https://automeris.io/WebPlotDigitizer/). To use the empirical generator yourself, create `data/digitized.py` with arrays `H_AL71`, `B_AL71`, `H_AL_OUTLIER`, `B_AL_OUTLIER_MIN`, `B_AL_OUTLIER_MAX` (see the module docstring in `data_generator.py` for details). If `data/digitized.py` is missing or fails to import, a warning is emitted: when only empirical was selected it falls back to nonparametric; when multiple generators were selected empirical is skipped. Use `--skip-empirical` to avoid the warning when you do not have digitized data.
 
 ## Installation
 
