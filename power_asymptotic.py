@@ -132,6 +132,7 @@ def asymptotic_power(n, rho_true, alpha=None, x_counts=None,
     if tie_correction and x_counts is not None:
         var0_ties = spearman_var_h0(n, x_counts=x_counts, tie_correction=True)
         var0_no_ties = 1.0 / (n - 1)
+        # Scale nc by sqrt(1/1.06); 1.06 is from Bonett–Wright for Fisher z (CI). Not verified in literature for power; see README.
         nc *= np.sqrt(var0_no_ties / var0_ties)*np.sqrt(1/1.06)
 
 

@@ -232,6 +232,10 @@ def spearman_rho_pvalue_2d(x: np.ndarray, y: np.ndarray, n: int):
     """
     Vectorized Spearman rho and two-sided p-value for 2D arrays.
 
+    Uses the t-approximation for testing ρ=0; with heavy ties a permutation
+    p-value is more appropriate and is now the default (see
+    config.USE_PERMUTATION_PVALUE and README).
+
     Parameters
     ----------
     x, y : ndarray, shape (n_rows, n)

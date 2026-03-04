@@ -101,28 +101,61 @@ All rank-based simulation methods (including full Iman-Conover) face similar att
 
 ### Gaussian copula
 
-Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for Y. Target Spearman rho is converted to Pearson correlation for sampling via `rho_p = 2 * sin(pi * rho_s / 6)`, then draws from a conditional bivariate normal. Y-values are mapped through the inverse CDF of the fitted log-normal.
+Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for Y. Target Spearman rho is converted to Pearson correlation for sampling; then draws from a conditional bivariate normal; Y-values are mapped through the inverse CDF of the fitted log-normal.
+
+**Conversion:** ρ_p = 2 sin(π ρ_s/6) (exact Spearman–Pearson for the bivariate normal). See `data_generator._spearman_to_pearson`.
+
+**Steps:** (1) x → ranks (average) → u_x = (ranks−0.5)/n, small jitter to break ties → z_x = Φ⁻¹(u_x); (2) draw z_y = ρ_p z_x + √(1−ρ_p²) Z; u_y = Φ(z_y); (3) y = F_ln⁻¹(u_y) with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
+
+**With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at ρ_s = 0.30 (cached per scenario) compensates.
 
 **Limitation**: When x has heavy ties, the jittering step that breaks tied ranks collapses rank information and attenuates the realised Spearman rho, leading to underestimated power. Alternatives tested — distributional transform (random uniform within each tie group's CDF band) and adaptive jitter (scaling jitter by tie group size) — improved the mild cases (k=10) but still failed the 0.01 accuracy threshold for heavy ties (k=4). This is a fundamental limitation of the continuous-marginals assumption. The method is retained for comparison purposes and works reliably when there are no ties; with heavy ties, calibration helps compensate for the rank information loss. It applies single-point calibration (probe at rho = 0.30) and is **not** the default method.
 
 ### Linear Monte Carlo
 
-Generates `y = a + b*x + noise` on a log scale, calibrated so that the Pearson correlation of ranks approximates the target Spearman rho. This is a parametric model -- useful as a complement to the non-parametric method, but approximate because it assumes a linear log-scale relationship.
+**Model:** log(y) = μ_ln + b·x_std + σ_noise·Z, with x_std = (x − mean(x))/std(x), and (μ_ln, σ_ln) from fitting log-normal to median/IQR. See `data_generator.generate_y_linear`.
+
+**Target:** ρ_p = 2 sin(π ρ_s/6); set b = ρ_p·σ_ln and noise variance σ_ln²(1−ρ_p²) so that theoretical Pearson(x_std, log y) = ρ_p.
+
+**Caveat:** Spearman(x, y) is only approximate to ρ_s because Spearman uses ranks of y, which are a nonlinear transform of log(y); no calibration step. Useful as a parametric complement to the non-parametric method.
 
 ### Empirical (Karwowski digitized data)
 
-Uses rank-mixing with **digitized Karwowski data pools** instead of a log-normal y-marginal. The **71 digitized values** (B-Al and H-Al each have 71) appear **exactly once** in every simulated dataset; only the remainder (2 for n=73, 10 for n=81, plus outliers for 80/82) is resampled per sim/rep. Pool structure: **73 ⊂ 80** (the first 73 elements of an n=80 pool equal the n=73 pool) and **81 ⊂ 82**. Sample sizes:
+Uses the same rank-mixing core as nonparametric (standardised midranks of x, mix with noise ranks, reorder); y-values come from **resampling** the digitized Karwowski pool (no log-normal). The **71 digitized values** (B-Al and H-Al each have 71) appear **exactly once** in every simulated dataset; only the remainder (2 for n=73, 10 for n=81, plus outliers for 80/82) is resampled per sim/rep. Pool structure: **73 ⊂ 80** (the first 73 elements of an n=80 pool equal the n=73 pool) and **81 ⊂ 82**. Sample sizes:
 
 - **n=73** → B-Al, outliers excluded (71 digitized + 2 resampled)
 - **n=80** → B-Al, full sample (73 clean + 7 outliers)
 - **n=81** → H-Al, outliers excluded (71 digitized + 10 resampled)
 - **n=82** → H-Al, full sample (81 clean + 1 outlier)
 
-Requires `data/digitized.py` (see [Digitized data](#digitized-data) below). Use `--skip-empirical` to exclude this method when digitized data is unavailable. Calibration uses the same multipoint/single-point logic as nonparametric, with separate caches.
+Requires `data/digitized.py` (see [Digitized data](#digitized-data) below). Use `--skip-empirical` to exclude this method when digitized data is unavailable. Calibration uses the same multipoint/single-point logic as nonparametric, with a **separate cache** so empirical and nonparametric do not share calibration state.
+
+For p-value and calibration decisions (new y per sim, single reference pool, per-dataset permutation for empirical) and the alternative design for future generalization, see [Empirical generator: p-value and calibration](#empirical-generator-p-value-and-calibration) below.
+
+#### Empirical generator: p-value and calibration
+
+**What we do (current design):**
+
+- **Pool and y per sim/rep:** The empirical generator uses a **pool** of y-values (e.g. 71 digitized + 2 or 10 “fill” for n=73 or 81; or 71 fixed + remainder resampled per sim if the “fixed 71” design is applied). Each n_sim or n_rep produces a **new** y dataset: either by resampling **n** values from the pool with replacement (current), or by using exactly the 71 digitized values plus a new random draw for the remainder (fixed-71 design). We do **not** reuse the same y across sims; we intentionally generate new y-data each sim/rep.
+- **Why new y each time is correct:** We are averaging over many (x, y) realizations. The pool (or the 71) is fixed; the **draws** from it (or the remainder) are random. So power and CI estimates average over the randomness in y, giving unbiased expectations and valid assessment of variability. This is the same principle as other generators (nonparametric, copula, linear), where y is newly generated every sim; here the “population” is the finite pool (or 71 + random remainder) instead of a parametric distribution.
+- **Calibration:** Calibration for empirical runs **once per scenario** (cached by n, n_distinct, distribution_type, etc.). It uses a **single reference pool** from `get_pool(n)` (fixed seed), not the per-sim pool. So the same `cal_rho` is used for all n_sims/n_reps in that scenario. Any small mismatch between that reference pool’s tie structure and a given sim’s pool (e.g. different 2 or 10 fill values) is **averaged over** by the randomness of the different y-data across sims: over many n_sims we average over (a) different x, (b) different y-pools/realizations, and (c) rank-mix assignment. The Monte Carlo mean remains close to the target; per-rep variation contributes to the variance we are estimating. So one reference pool and one `cal_rho` per scenario is a reasonable and consistent setup.
+- **P-value by Monte Carlo (permutation):** For the **empirical** generator, y can have **ties** (finite pool → repeated values). The null distribution of Spearman ρ under permutation depends on **both** the x and y tie structures. Because the y tie pattern **varies per dataset** (each sim has a different y from the pool), there is no single precomputed null per scenario. So for empirical we **always use per-dataset Monte Carlo permutation** (no precomputed null cache). This is the only option for empirical; for other generators we can use a precomputed null keyed by (n, x tie structure) when y has no ties.
+
+**Why this is legitimate:**
+
+- **New y per sim:** Intentional and correct for operating characteristics (power, CI). We are not reusing the same dataset; we are drawing new (x, y) each time and averaging. No analogue to the earlier n_boot bug (where data depended on n_boot); here data and bootstrap/RNG streams are separated as intended.
+- **Single reference pool for calibration:** Cost and simplicity (one calibration per scenario). The approximation (one `cal_rho` for all sims) is valid because any bias from pool-to-pool variation is averaged out over n_sims.
+
+**Alternative: “generate new y datasets each time” as population sampling (future generalization):**
+
+A different design would be to treat the **pool as the population** and, each sim, **sample n values with replacement** from that pool (current “resampling from whole pool” is already in this spirit). That answers: **“If the pool were the true population and we ran many experiments, each drawing n from it, what would we see?”** — i.e. **what might happen if multiple such experiments were run**, with the 71 not special but part of the population (so in a given simulated sample, the 71 can appear 0, 1, 2, … times).
+
+- **Contrast with current (fixed-71) target:** Our target is **“For this Karwowski study (these 71), what would power/CI look like under uncertainty in the missing/extra values?”** So the 71 are fixed in every sim; only the remainder varies. That is a **conditional** question given this study’s digitized values.
+- **Generalization:** The “pool as population, new sample of n each time” approach generalizes naturally to **other scenarios**: different studies, different n, or different pools. Scripts could be extended to accept an arbitrary pool (or parametric model) and simulate “many replications from a representative population.” This is documented as a **potential future generalization** so readers understand the design choice (conditional on this study vs. unconditional over replications) and how one might extend the code.
 
 ### Asymptotic
 
-Closed-form formulas (no simulation). Power uses the non-central t-distribution with df = n-2; CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)). Ties are handled via the Fieller-Hartley-Pearson variance correction throughout (see [Tie correction](#tie-correction-fieller-hartley-pearson) below). Fast and stable, serves as a cross-check against the Monte Carlo methods.
+Closed-form expressions (no simulation). Power uses the non-central t-distribution with df = n-2 and Fieller-Hartley-Pearson tie correction for x only, including the √(1/1.06) factor in the noncentrality (see [Statistical methods](#statistical-methods) for details). CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)); ties handled via FHP for x only (see [Tie correction](#tie-correction-fieller-hartley-pearson)). Fast and stable, serves as a cross-check against the Monte Carlo methods.
 
 ### P-value method (power simulation)
 
@@ -131,7 +164,56 @@ Power simulation uses **permutation-based p-values** instead of the t-approximat
 - **Non-empirical generators** (nonparametric, copula, linear): A **precomputed null** distribution of Spearman rhos is built once per (n, tie structure) and cached. P-values are computed by binary search against sorted |null_rho|. On first use for a scenario (~1s for n≈80, 50k null samples), the null is built and cached; subsequent calls reuse it. Optional: call `permutation_pvalue.warm_precomputed_null_cache()` to pre-build nulls for all scenarios before long runs.
 - **Empirical generator:** Y may have ties that vary per dataset, so a single precomputed null is not applicable. The code uses **per-dataset Monte Carlo** permutation p-values with adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba. When n_sims exceeds a threshold (default 5k), sims are processed in chunks (default 2k) to cap memory (see [Memory (Monte Carlo p-value)](#memory-monte-carlo-p-value-batching) below).
 
-Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for power (e.g. for comparison or tests).
+Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for power (e.g. for comparison or tests). For the full equations (precomputed null construction, binary-search p-value, per-dataset MC, fallback t-approximation) and the **MC-on-cache-miss** option, see [Statistical methods](#statistical-methods) below.
+
+**MC-on-cache-miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the precomputed null on a cache miss. It looks up the cache only; if the null is present it is used, otherwise the same per-dataset Monte Carlo permutation path as the empirical generator is used (no build, no cache write). Default is `False` (always build and cache on first use). Use this to avoid precomputed-null build and memory for custom frequencies or one-off scenarios.
+
+## Statistical methods
+
+### Hypothesis and test
+
+- **H₀:** ρ = 0 vs **H₁:** ρ ≠ 0, two-sided, α = 0.05.
+- The same test statistic is used in both asymptotic power and in the Monte Carlo power loop (see below).
+
+### P-value methods for Monte Carlo power
+
+**Default: permutation-based p-values** (`config.USE_PERMUTATION_PVALUE = True`). Two paths:
+
+- **Precomputed null** (non-empirical generators: nonparametric, copula, linear): Build once per (n, tie structure): generate `n_pre` (default 50,000) random permutations of y-ranks (1…n) while keeping x-midranks fixed; compute Spearman ρ for each → sort |null_ρ|. P-value for observed |ρ_obs|: **p = (1 + #{|null_ρ| ≥ |ρ_obs|}) / (1 + n_pre)**, using binary search against the sorted array. Cached and reused across all sims in a scenario. See `permutation_pvalue.get_precomputed_null` and `pvalues_from_precomputed_null`.
+  - **MC on cache miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the null on a cache miss. It uses a cache lookup only; if the null is in cache it is used, otherwise the same per-dataset MC path as the empirical generator is used (no build, no cache write). Default is `False`.
+- **Per-dataset Monte Carlo** (empirical generator, where y can have ties that vary per dataset): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman ρ for each, and **p = (1 + #{|perm_ρ| ≥ |ρ_obs|}) / (1 + n_perm)**. Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See `permutation_pvalue.pvalues_mc`.
+
+Power = proportion of sims with p < α.
+
+**Fallback: t-approximation p-value** (`config.USE_PERMUTATION_PVALUE = False`):
+
+- **Equation:** t = ρ √((n−2)/(1−ρ²)) with df = n − 2; two-sided p-value = 2 × P(T ≥ |t|) for T ~ t_{n−2}. See `spearman_helpers.spearman_rho_pvalue_2d`.
+- **Where also used:** The asymptotic power derivation uses the same t-statistic to define the noncentrality parameter (below).
+- **Caveat:** The t-approximation is unreliable with **heavy ties** in x (few distinct values); the null distribution of ρ is not well approximated by the t-distribution in this setting, and the approximation can be anticonservative (p-values too small, type I error inflated). This is why permutation is the default. The t-approximation remains available for comparison or backward compatibility.
+
+### Asymptotic power (non-central t)
+
+- **Noncentrality (all-distinct):** nc = ρ_true √(n−2) / √(1 − ρ_true²). Power = P(|T| > t_crit) for T ~ noncentral t(df = n−2, nc).
+- **Tie adjustment (FHP):** When ties are present, nc is scaled by √(var₀^noties / var₀^ties) (see FHP below).
+- **Extra factor in code:** The implementation additionally multiplies nc by **√(1/1.06)** (`power_asymptotic.asymptotic_power`, tie-correction branch). The 1.06 factor is from Bonett & Wright (2000) for the **Fisher z standard error (confidence intervals)**. No published source has been identified that justifies applying this factor to the **noncentrality parameter** in the power equation. It is included for consistency with the CI efficiency loss; this may warrant review.
+
+### Asymptotic confidence interval
+
+z = arctanh(ρ); SE in z-space = √(1.06/(n−3)) (Bonett–Wright). With ties: SE_z scaled by √(var₀^ties / var₀^noties). CI in z-space then back-transformed via tanh.
+
+### Fieller–Hartley–Pearson (FHP) variance under H₀
+
+Tx = Σ(tᵢ³ − tᵢ) over x tie groups (similarly Ty for y); Dx = (n³−n−Tx)/12, Dy = (n³−n−Ty)/12; Var(ρ) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). No ties ⇒ 1/(n−1).
+
+**Tie correction is currently for x only in asymptotic expressions:** In this codebase, the asymptotic power and CI use FHP **for x only**. Only `x_counts` is passed to the variance calculation; `y_counts` is not used (y is effectively treated as having no ties for the asymptotic expressions). So the implemented var₀ uses Dx from x tie groups and Dy = (n³−n)/12 (no y ties). This matches the design: x is cumulative vaccine aluminum (heavy ties); y is aluminum level (typically few or no ties in our generators). The code does have implemented some options to include ties for y also.
+
+### Ranks
+
+Average-rank tie handling (midranks) throughout; same as `scipy.stats.rankdata(..., method="average")`.
+
+### Bootstrap RNG
+
+Bootstrap uses separate RNG streams for data and bootstrap so the same seed yields the same n_reps datasets regardless of n_boot; see [Separate RNG streams for data and bootstrap](#separate-rng-streams-for-data-and-bootstrap) under Bootstrap CI.
 
 ## Digitized data (for empirical generator)
 
@@ -345,11 +427,11 @@ With tied x-values, the midrank representation has lower variance than distinct 
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
-The standard Fisher z-transform SE for Pearson r is `sqrt(1/(n-3))`. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = `sqrt(1.06/(n-3))`. The theoretical asymptotic variance factor for Spearman rho (no ties) is π²/9 ≈ 1.0966; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice.
+The standard Fisher z-transform SE for Pearson r is `sqrt(1/(n-3))`. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = `sqrt(1.06/(n-3))`. The theoretical asymptotic variance factor for Spearman rho (no ties) is π²/9 ≈ 1.0966; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation and the note on 1.06 in the power noncentrality, see [Statistical methods](#statistical-methods).
 
 ### Why non-central t for power?
 
-The Spearman test statistic `t = rho * sqrt(n-2) / sqrt(1 - rho^2)` follows a non-central t-distribution under the alternative. This is more accurate than the normal approximation (which uses constant H0 variance) because the `sqrt(1 - rho^2)` denominator captures the variance reduction as |rho| grows toward 1.
+The Spearman test statistic `t = rho * sqrt(n-2) / sqrt(1 - rho^2)` follows a non-central t-distribution under the alternative. This is more accurate than the normal approximation (which uses constant H0 variance) because the `sqrt(1 - rho^2)` denominator captures the variance reduction as |rho| grows toward 1. For the noncentrality equation, tie adjustment, and the note on the 1.06 factor in power, see [Statistical methods](#statistical-methods).
 
 ### Why Fisher z-transform for CIs?
 
@@ -359,7 +441,7 @@ The arctanh transform stabilises the variance of the correlation coefficient and
 
 The Fieller-Hartley-Pearson correction adjusts the **variance of Spearman rho under the null hypothesis (H0)** when ties are present in the rank data. Ties reduce the effective rank information (e.g., many observations sharing the same x-value), so the sampling variance of rho increases. The correction uses the standard formula: define Tx = Σ(tᵢ³ − tᵢ) over tie groups in x (and Ty for y), Dx = (n³−n − Tx)/12, Dy = (n³−n − Ty)/12; then Var(rho) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). When there are no ties, Dx = Dy = (n³−n)/12 and this reduces to 1/(n−1).
 
-**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by √(var_no_ties / var_ties), reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by √(var_ties / var_no_ties), widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%).
+**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by √(var_no_ties / var_ties), reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by √(var_ties / var_no_ties), widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
 
 ## Bootstrap CI
 
