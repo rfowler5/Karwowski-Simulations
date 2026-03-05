@@ -63,39 +63,41 @@ This is a bivariate simplification of the Iman-Conover method, applied directly 
 
 #### Validity, Assumptions, and Attenuation with Heavy Ties
 
-The method induces an exact Pearson correlation $\rho_{\mathrm{cal}}$ between the mixed reference ranks and the standardized midranks $s_x$ via the bivariate Cholesky mixing:
+The method induces an exact Pearson correlation $`\rho_{\mathrm{cal}}`$ between the mixed reference ranks and the standardized midranks $`s_x`$ via the bivariate Cholesky mixing:
 
-$$
+```math
 \mathrm{mixed} = \rho_{\mathrm{cal}} \cdot s_x + \sqrt{1 - \rho_{\mathrm{cal}}^2} \cdot s_{\mathrm{noise}}
-$$
+```
 
 where:
-- $s_x$ = standardized midranks of x (mean 0, variance 1, incorporating ties via averaging)
-- $s_{\mathrm{noise}}$ = standardized ranks from a random permutation (independent, mean 0, variance 1)
+- $`s_x`$ = standardized midranks of x (mean 0, variance 1, incorporating ties via averaging)
+- $`s_{\mathrm{noise}}`$ = standardized ranks from a random permutation (independent, mean 0, variance 1)
 
-**Derivation of exact Pearson correlation:** Let $X = s_x$, $Z = s_{\mathrm{noise}}$ (independent, $\mathrm{E}[X]=\mathrm{E}[Z]=0$, $\mathrm{Var}(X)=\mathrm{Var}(Z)=1$). Then $B = \rho X + \sqrt{1-\rho^2} Z$:
+**Derivation of exact Pearson correlation:** Let $`X = s_x`$, $`Z = s_{\mathrm{noise}}`$ (independent, $`\mathrm{E}[X]=\mathrm{E}[Z]=0`$, $`\mathrm{Var}(X)=\mathrm{Var}(Z)=1`$). Then $`B = \rho X + \sqrt{1-\rho^2} Z`$:
 
-$$
+```math
 \mathrm{Var}(B) = \rho^2 \mathrm{Var}(X) + (1-\rho^2) \mathrm{Var}(Z) + 2\rho\sqrt{1-\rho^2}\,\mathrm{Cov}(X,Z) = \rho^2 + (1-\rho^2) = 1
-$$
+```
 
-$$
+```math
 \mathrm{Cov}(X, B) = \rho\,\mathrm{Var}(X) + \sqrt{1-\rho^2}\,\mathrm{Cov}(X,Z) = \rho
-$$
+```
 
-$$
+```math
 \mathrm{Corr}(X, B) = \frac{\mathrm{Cov}(X,B)}{\sqrt{\mathrm{Var}(X)\,\mathrm{Var}(B)}} = \rho
-$$
+```
 
-This holds purely from covariance algebra — no assumption is required that $X$ and $s_{\mathrm{noise}}$ come from the same distribution, only that they are independent with mean 0 and variance 1.
+This holds purely from covariance algebra — no assumption is required that $`X`$ and $`s_{\mathrm{noise}}`$ come from the same distribution, only that they are independent with mean 0 and variance 1.
 
-The final Spearman $\rho_s$ is the Pearson correlation of the ranks of x and the reordered y. With no ties, this would equal $\rho_{\mathrm{cal}}$ (ranks are monotone transforms). With heavy ties in x, midranks compress the effective variance/resolution of $s_x$ (large blocks of identical values), so the mapping from the finely resolved mixed ranks back to the clumped ranks of x attenuates the realised Spearman below $\rho_{\mathrm{cal}}$.
+The final Spearman $`\rho_s`$ is the Pearson correlation of the ranks of x and the reordered y. With no ties, this would equal $`\rho_{\mathrm{cal}}`$ (ranks are monotone transforms). With heavy ties in x, midranks compress the effective variance/resolution of $`s_x`$ (large blocks of identical values), so the mapping from the finely resolved mixed ranks back to the clumped ranks of x attenuates the realised Spearman below $`\rho_{\mathrm{cal}}`$.
 
 Approximate attenuation factor:
 
-$$\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}$$
+```math
+\sqrt{1 - \sum(m_j^3 - m_j)/(n^3 - n)}
+```
 
-where $m_j$ are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in $\rho_{\mathrm{cal}}$, which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
+where $`m_j`$ are tie group sizes (from Fieller-Hartley-Pearson variance correction). The attenuation is nonlinear in $`\rho_{\mathrm{cal}}`$, which is why multipoint calibration (probing at 0.10, 0.30, 0.50 and interpolating) is preferred over single-point.
 
 All rank-based simulation methods (including full Iman-Conover) face similar attenuation with heavy ties; the calibration step ensures the realised Spearman matches the target within tolerance (typically < 0.01 bias).
 
@@ -105,21 +107,21 @@ All rank-based simulation methods (including full Iman-Conover) face similar att
 
 Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for Y. Target Spearman rho is converted to Pearson correlation for sampling; then draws from a conditional bivariate normal; Y-values are mapped through the inverse CDF of the fitted log-normal.
 
-**Conversion:** ρ_p = 2 sin(π ρ_s/6) (exact Spearman–Pearson for the bivariate normal). See `data_generator._spearman_to_pearson`.
+**Conversion:** $`\rho_p = 2\sin(\pi \rho_s/6)`$ (exact Spearman–Pearson for the bivariate normal). See `data_generator._spearman_to_pearson`.
 
-**Steps:** (1) x → ranks (average) → u_x = (ranks−0.5)/n, small jitter to break ties → z_x = Φ⁻¹(u_x); (2) draw z_y = ρ_p z_x + √(1−ρ_p²) Z; u_y = Φ(z_y); (3) y = F_ln⁻¹(u_y) with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
+**Steps:** (1) x → ranks (average) → $`u_x = (\text{ranks}-0.5)/n`$, small jitter to break ties → $`z_x = \Phi^{-1}(u_x)`$; (2) draw $`z_y = \rho_p z_x + \sqrt{1-\rho_p^2} Z`$; $`u_y = \Phi(z_y)`$; (3) $`y = F_{\ln}^{-1}(u_y)`$ with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
 
-**With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at ρ_s = 0.30 (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
+**With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at $`\rho_s = 0.30`$ (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
 
 **Limitation**: When x has heavy ties, the jittering step that breaks tied ranks collapses rank information and attenuates the realised Spearman rho, leading to underestimated power. Alternatives tested — distributional transform (random uniform within each tie group's CDF band) and adaptive jitter (scaling jitter by tie group size) — improved the mild cases (k=10) but still failed the 0.01 accuracy threshold for heavy ties (k=4). This is a fundamental limitation of the continuous-marginals assumption. The method is retained for comparison purposes and works reliably when there are no ties; with heavy ties, calibration helps compensate for the rank information loss. It applies single-point calibration (probe at rho = 0.30) and is **not** the default method.
 
 ### Linear Monte Carlo
 
-**Model:** log(y) = μ_ln + b·x_std + σ_noise·Z, with x_std = (x − mean(x))/std(x), and (μ_ln, σ_ln) from fitting log-normal to median/IQR. See `data_generator.generate_y_linear`.
+**Model:** $`\log(y) = \mu_{\ln} + b \cdot x_{\mathrm{std}} + \sigma_{\mathrm{noise}} \cdot Z`$, with $`x_{\mathrm{std}} = (x - \mathrm{mean}(x))/\mathrm{std}(x)`$, and $`(\mu_{\ln}, \sigma_{\ln})`$ from fitting log-normal to median/IQR. See `data_generator.generate_y_linear`.
 
-**Target:** ρ_p = 2 sin(π ρ_s/6); set b = ρ_p·σ_ln and noise variance σ_ln²(1−ρ_p²) so that theoretical Pearson(x_std, log y) = ρ_p.
+**Target:** $`\rho_p = 2\sin(\pi \rho_s/6)`$; set $`b = \rho_p \cdot \sigma_{\ln}`$ and noise variance $`\sigma_{\ln}^2(1-\rho_p^2)`$ so that theoretical Pearson($`x_{\mathrm{std}}`$, log y) = $`\rho_p`$.
 
-**Caveat:** Spearman(x, y) is only approximate to ρ_s because Spearman uses ranks of y, which are a nonlinear transform of log(y); no calibration step. Useful as a parametric complement to the non-parametric method.
+**Caveat:** Spearman(x, y) is only approximate to $`\rho_s`$ because Spearman uses ranks of y, which are a nonlinear transform of log(y); no calibration step. Useful as a parametric complement to the non-parametric method.
 
 ### Empirical (Karwowski digitized data)
 
@@ -181,27 +183,27 @@ Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for
 
 **Default: permutation-based p-values** (`config.USE_PERMUTATION_PVALUE = True`). Two paths:
 
-- **Precomputed null** (non-empirical generators: nonparametric, copula, linear): Build once per (n, tie structure): generate `n_pre` (default 50,000) random permutations of y-ranks (1…n) while keeping x-midranks fixed; compute Spearman ρ for each → sort |null_ρ|. P-value for observed |ρ_obs|: **p = (1 + #{|null_ρ| ≥ |ρ_obs|}) / (1 + n_pre)**, using binary search against the sorted array. Cached and reused across all sims in a scenario. See `permutation_pvalue.get_precomputed_null` and `pvalues_from_precomputed_null`.
+- **Precomputed null** (non-empirical generators: nonparametric, copula, linear): Build once per (n, tie structure): generate `n_pre` (default 50,000) random permutations of y-ranks (1…n) while keeping x-midranks fixed; compute Spearman $`\rho`$ for each → sort $`|\rho_{\mathrm{null}}|`$. P-value for observed $`|\rho_{\mathrm{obs}}|`$: $`p = (1 + N) / (1 + n_{\mathrm{pre}})`$, where *N* is the number of null $`\rho`$ with $`|\rho_{\mathrm{null}}| \geq |\rho_{\mathrm{obs}}|`$, using binary search against the sorted array. Cached and reused across all sims in a scenario. See `permutation_pvalue.get_precomputed_null` and `pvalues_from_precomputed_null`.
   - **MC on cache miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the null on a cache miss. It uses a cache lookup only; if the null is in cache it is used, otherwise the same per-dataset MC path as the empirical generator is used (no build, no cache write). Default is `False`.
-- **Per-dataset Monte Carlo** (empirical generator, where y can have ties that vary per dataset): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman ρ for each, and **p = (1 + #{|perm_ρ| ≥ |ρ_obs|}) / (1 + n_perm)**. Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See `permutation_pvalue.pvalues_mc`.
+- **Per-dataset Monte Carlo** (empirical generator, where y can have ties that vary per dataset): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman $`\rho`$ for each, and $`p = (1 + N) / (1 + n_{\mathrm{perm}})`$, where *N* is the number of permutation $`\rho`$ with $`|\rho_{\mathrm{perm}}| \geq |\rho_{\mathrm{obs}}|`$. Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See `permutation_pvalue.pvalues_mc`.
 
 Power = proportion of sims with p < α.
 
 **Fallback: t-approximation p-value** (`config.USE_PERMUTATION_PVALUE = False`):
 
-- **Equation:** t = ρ √((n−2)/(1−ρ²)) with df = n − 2; two-sided p-value = 2 × P(T ≥ |t|) for T ~ t_{n−2}. See `spearman_helpers.spearman_rho_pvalue_2d`.
+- **Equation:** $`t = \rho\sqrt{(n-2)/(1-\rho^2)}`$ with df = $`n-2`$; two-sided p-value = $`2 \times P(T \geq |t|)`$ for $`T \sim t_{n-2}`$. See `spearman_helpers.spearman_rho_pvalue_2d`.
 - **Where also used:** The asymptotic power derivation uses the same t-statistic to define the noncentrality parameter (below).
-- **Caveat:** The t-approximation is unreliable with **heavy ties** in x (few distinct values); the null distribution of ρ is not well approximated by the t-distribution in this setting, and the approximation can be anticonservative (p-values too small, type I error inflated). This is why permutation is the default. The t-approximation remains available for comparison or backward compatibility.
+- **Caveat:** The t-approximation is unreliable with **heavy ties** in x (few distinct values); the null distribution of $`\rho`$ is not well approximated by the t-distribution in this setting, and the approximation can be anticonservative (p-values too small, type I error inflated). This is why permutation is the default. The t-approximation remains available for comparison or backward compatibility.
 
 ### Asymptotic power (non-central t)
 
-- **Noncentrality (all-distinct):** nc = ρ_true √(n−2) / √(1 − ρ_true²). Power = P(|T| > t_crit) for T ~ noncentral t(df = n−2, nc).
-- **Tie adjustment (FHP):** When ties are present, nc is scaled by √(var₀^noties / var₀^ties) (see FHP below).
-- **Removed factor (historical note):** A previous AI-generated version of this code multiplied nc by an additional **√(1/1.06)** in the tie-correction branch, attempting to account for the Bonett-Wright efficiency loss (the 1.06 factor used in the CI formula). No published source justifies applying this factor to the noncentrality parameter; the 1.06 is specific to the Fisher z standard error for confidence intervals and does not belong in the power formula. The factor has been removed. The Bonett-Wright 1.06 remains in `asymptotic_ci` where it is well-established.
+- **Noncentrality (all-distinct):** $`\mathrm{nc} = \rho_{\mathrm{true}} \sqrt{n-2} / \sqrt{1 - \rho_{\mathrm{true}}^2}`$. Power = $`P(|T| > t_{\mathrm{crit}})`$ for $`T \sim`$ noncentral $`t`$(df = $`n-2`$, nc).
+- **Tie adjustment (FHP):** When ties are present, nc is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{noties}} / \mathrm{var}_0^{\mathrm{ties}}}`$ (see FHP below).
+- **Removed factor (historical note):** A previous AI-generated version of this code multiplied nc by an additional $`\sqrt{1/1.06}`$ in the tie-correction branch, attempting to account for the Bonett-Wright efficiency loss (the 1.06 factor used in the CI formula). No published source justifies applying this factor to the noncentrality parameter; the 1.06 is specific to the Fisher z standard error for confidence intervals and does not belong in the power formula. The factor has been removed. The Bonett-Wright 1.06 remains in `asymptotic_ci` where it is well-established.
 
 ### Asymptotic confidence interval
 
-z = arctanh(ρ); SE in z-space = √(1.06/(n−3)) (Bonett–Wright). With ties: SE_z scaled by √(var₀^ties / var₀^noties). CI in z-space then back-transformed via tanh.
+$`z = \mathrm{arctanh}(\rho)`$; SE in z-space = $`\sqrt{1.06/(n-3)}`$ (Bonett–Wright). With ties: $`\mathrm{SE}_z`$ scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{noties}}}`$. CI in z-space then back-transformed via tanh.
 
 ### Fieller–Hartley–Pearson (FHP) variance under H₀
 
@@ -433,7 +435,7 @@ With the default `n_cal=300`, calibration accuracy (SE of mean rho) is approxima
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
-The standard Fisher z-transform SE for Pearson r is `sqrt(1/(n-3))`. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = `sqrt(1.06/(n-3))`. The theoretical asymptotic variance factor for Spearman rho (no ties) is π²/9 ≈ 1.0966; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation, see [Statistical methods](#statistical-methods). Note: a previous version also applied √(1/1.06) to the asymptotic power noncentrality parameter; this was an AI-generated fudge factor not supported by the literature and has been removed.
+The standard Fisher z-transform SE for Pearson r is $`\sqrt{1/(n-3)}`$. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = $`\sqrt{1.06/(n-3)}`$. The theoretical asymptotic variance factor for Spearman rho (no ties) is $`\pi^2/9 \approx 1.0966`$; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation, see [Statistical methods](#statistical-methods). Note: a previous version also applied $`\sqrt{1/1.06}`$ to the asymptotic power noncentrality parameter; this was an AI-generated fudge factor not supported by the literature and has been removed.
 
 ### Why non-central t for power?
 
@@ -447,54 +449,54 @@ The arctanh transform stabilises the variance of the correlation coefficient and
 
 The Fieller-Hartley-Pearson correction adjusts the **variance of Spearman rho under the null hypothesis (H0)** when ties are present in the rank data. Ties reduce the effective rank information (e.g., many observations sharing the same x-value), so the sampling variance of rho increases. The correction uses the standard formula: define Tx = Σ(tᵢ³ − tᵢ) over tie groups in x (and Ty for y), Dx = (n³−n − Tx)/12, Dy = (n³−n − Ty)/12; then Var(rho) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). When there are no ties, Dx = Dy = (n³−n)/12 and this reduces to 1/(n−1).
 
-**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by √(var_no_ties / var_ties), reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by √(var_ties / var_no_ties), widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
+**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{noties}} / \mathrm{var}_0^{\mathrm{ties}}}`$, reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{noties}}}`$, widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
 
 **Approximation note:** The combination of Bonett-Wright (1.06 in SE) with the FHP tie correction is a heuristic -- no single published reference validates applying both corrections simultaneously. Each is well-established individually; their product is a practical approximation.
 
 ## Bootstrap CI
 
-The bootstrap uses paired (x,y) resampling with replacement and reports the percentile interval (2.5th and 97.5th percentiles of the bootstrap distribution). The reported CIs average these endpoints over many simulated datasets (n_reps) to estimate the expected bootstrap CI under the model. Two design choices affect correctness and precision:
+The bootstrap uses paired (x,y) resampling with replacement and reports the percentile interval (2.5th and 97.5th percentiles of the bootstrap distribution). The reported CIs average these endpoints over many simulated datasets (`n_reps`) to estimate the expected bootstrap CI under the model. Two design choices affect correctness and precision:
 
 ### Separate RNG streams for data and bootstrap
 
-Data generation and bootstrap resampling use **separate** RNG streams derived from the same seed via `np.random.SeedSequence.spawn(2)`. A shared RNG would advance by `n_boot * n` extra draws per rep inside the bootstrap loop, so the datasets for reps 1..n_reps would depend on `n_boot`. That would make results non-comparable across different `n_boot` values and invalidate the interpretation that "more bootstraps = more accurate." With separate streams, the same seed always produces the same n_reps datasets regardless of `n_boot`.
+Data generation and bootstrap resampling use **separate** RNG streams derived from the same seed via `np.random.SeedSequence.spawn(2)`. A shared RNG would advance by `n_boot * n` extra draws per rep inside the bootstrap loop, so the datasets for reps 1..`n_reps` would depend on `n_boot`. That would make results non-comparable across different `n_boot` values and invalidate the interpretation that "more bootstraps = more accurate." With separate streams, the same seed always produces the same `n_reps` datasets regardless of `n_boot`.
 
-### n_reps, SE, and reliability of the second decimal
+### `n_reps`, SE, and reliability of the second decimal
 
-The CI endpoints vary across reps (inter-rep SD ≈ 0.10–0.11 for N=73, slightly lower for N=80+). The SE of the mean endpoint is SD/√n_reps. The 95% CI for the true mean is approximately ±1.96×SE.
+The CI endpoints vary across reps (inter-rep SD ≈ 0.10–0.11 for N=73, slightly lower for N=80+). The SE of the mean endpoint is SD/√`n_reps`. The 95% CI for the true mean is approximately ±1.96×SE.
 
-| Target | SE | 95% CI half-width | n_reps | When it matters |
+| Target | SE | 95% CI half-width | `n_reps` | When it matters |
 |--------|-----|-------------------|--------|-----------------|
 | Borderline | 0.005 | ±0.01 | ≈400 | Second decimal can still be off by one unit |
 | Strong (README "reliable") | 0.0025 | ±0.005 | ≈1600 | Useful precision; fine when *not* near a rounding boundary |
 | Rounding guarantee | 0.00128 | ±0.0025 | ≈7400 | Needed only when the value is *near* a boundary (e.g. 0.345, 0.355) |
 
-**Rounding boundaries:** The boundary between rounding to 0.34 vs 0.35 is 0.345. With n_reps=1600 (95% CI ±0.005), if you observe 0.345 the CI spans [0.34, 0.35] and crosses the boundary—you cannot confidently round. When the value is not near a boundary (e.g. 0.32, 0.38), n_reps=1600 is adequate. The n_reps≈7400 "rounding guarantee" is only needed when you happen to land near a boundary and want confidence in which way to round.
+**Rounding boundaries:** The boundary between rounding to 0.34 vs 0.35 is 0.345. With `n_reps`=1600 (95% CI ±0.005), if you observe 0.345 the CI spans [0.34, 0.35] and crosses the boundary—you cannot confidently round. When the value is not near a boundary (e.g. 0.32, 0.38), `n_reps`=1600 is adequate. The `n_reps`≈7400 "rounding guarantee" is only needed when you happen to land near a boundary and want confidence in which way to round.
 
-With n_reps=200, SE ≈ 0.007 (worst case N=73), so the third decimal is uncertain and the second decimal is borderline. The default n_reps=200 is a practical trade-off.
+With `n_reps`=200, SE ≈ 0.007 (worst case N=73), so the third decimal is uncertain and the second decimal is borderline. The default `n_reps`=200 is a practical trade-off.
 
-### n_boot choice (with high n_reps)
+### `n_boot` choice (with high `n_reps`)
 
-Bootstrap quantile noise scales as 1/√n_boot and is negligible compared with inter-rep variability (σ_inter ≈ 0.11) when n_reps is high. With n_reps ≥ 1600:
+Bootstrap quantile noise scales as $`1/\sqrt{n_{\mathrm{boot}}}`$ (with `n_boot` the number of bootstrap samples) and is negligible compared with inter-rep variability ($`\sigma_{\mathrm{inter}} \approx 0.11`$) when `n_reps` is high. With `n_reps` ≥ 1600:
 
-- **n_boot=200–400** suffices: bootstrap variance adds under 0.5% to total; 2.5th percentile estimated from 5–10 order statistics.
-- **n_boot=500** is comfortable; going higher gives no meaningful improvement.
-- **n_boot=1000** (default in `config.py`) is more than needed for high n_reps; use 200–500 to save time.
+- **`n_boot`=200–400** suffices: bootstrap variance adds under 0.5% to total; 2.5th percentile estimated from 5–10 order statistics.
+- **`n_boot`=500** is comfortable; going higher gives no meaningful improvement.
+- **`n_boot`=1000** (default in `config.py`) is more than needed for high `n_reps`; use 200–500 to save time.
 
-When n_reps=200, **n_boot=500** is sufficient; the ~0.001–0.002 difference from n_boot=1000 is swamped by the ~0.007 SE from inter-rep variability.
+When `n_reps`=200, **`n_boot`=500** is sufficient; the ~0.001–0.002 difference from n_boot=1000 is swamped by the ~0.007 SE from inter-rep variability.
 
-### Verifying n_boot
+### Verifying `n_boot`
 
-To check whether your chosen n_boot is sufficient, run the same scenario with n_boot=500 and n_boot=2000 (same seed). Compare the printed bootstrap CI endpoints:
+To check whether your chosen `n_boot` is sufficient, run the same scenario with `n_boot`=500 and `n_boot`=2000 (same seed). Compare the printed bootstrap CI endpoints:
 
-**Quick check** (n_reps=50, ~1–2 min total): If the difference in CI endpoints is under ~0.003, n_boot=500 is fine for 2-decimal precision. Example:
+**Quick check** (`n_reps`=50, ~1–2 min total): If the difference in CI endpoints is under ~0.003, `n_boot`=500 is fine for 2-decimal precision. Example:
 
 ```bash
 python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 500 --seed 42 --skip-copula --skip-linear
 python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_center --ci-only --n-reps 50 --n-boot 2000 --seed 42 --skip-copula --skip-linear
 ```
 
-**Thorough check** (n_reps=200, ~5–10 min total): Use n_reps=200 for a more stable comparison and to confirm the averaged CI is well converged.
+**Thorough check** (`n_reps`=200, ~5–10 min total): Use `n_reps`=200 for a more stable comparison and to confirm the averaged CI is well converged.
 
 ## Performance and Runtime Estimates
 
@@ -536,11 +538,11 @@ When using the **Monte Carlo p-value path** (empirical generator, or any generat
 
 For user-computed errors and planning n_sims / n_cal:
 
-- **Power estimate (binomial):** $\hat{p}$ = proportion of sims with p < α. $\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}$. For power near 0.80, $\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}$.
-- **Bisection contribution to SE(min ρ):** $\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}$ with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb $\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}$.
-- **Calibration contribution:** Calibration uncertainty scales as $1/\sqrt{n_{\mathrm{cal}}}$; propagates to min detectable ρ. $\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}$ (coefficient depends on scenario).
-- **Combined uncertainty (independent):** $\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }$.
-- **95% CI half-width:** Half-width ≈ 1.96 × $\mathrm{SE}_{\mathrm{total}}(\rho)$. For target half-width w, aim for $\mathrm{SE}_{\mathrm{total}} \leq w / 1.96$.
+- **Power estimate (binomial):** $`\hat{p}`$ = proportion of sims with p < α. $`\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}`$. For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}`$.
+- **Bisection contribution to SE(min ρ):** $`\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}`$ with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb $`\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}`$.
+- **Calibration contribution:** Calibration uncertainty scales as $`1/\sqrt{n_{\mathrm{cal}}}`$; propagates to min detectable ρ. $`\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}`$ (coefficient depends on scenario).
+- **Combined uncertainty (independent):** $`\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }`$.
+- **95% CI half-width:** Half-width ≈ 1.96 × $`\mathrm{SE}_{\mathrm{total}}(\rho)`$. For target half-width w, aim for $`\mathrm{SE}_{\mathrm{total}} \leq w / 1.96`$.
 - **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
 
 ### Benchmark data (CI bootstrap)
@@ -601,7 +603,7 @@ With this setup, joblib at `n_jobs=4` gives **~2×** on the full grid (16 min �
 
 ### With Numba JIT (recommended)
 
-Numba JIT compilation speeds up the bootstrap and ranking loops. Pre-warm with `python scripts/warm_up_numba.py` to avoid first-run compile delay. On a 4-logical-core machine, use **n_jobs=1** for CI with batch bootstrap as above; for power or per-rep bootstrap CI, `n_jobs=4` or `-1` can reduce wall time.
+Numba JIT compilation speeds up the bootstrap and ranking loops. Pre-warm with `python scripts/warm_up_numba.py` to avoid first-run compile delay. On a 4-logical-core machine, use **`n_jobs`=1** for CI with batch bootstrap as above; for power or per-rep bootstrap CI, `n_jobs=4` or `-1` can reduce wall time.
 
 | Task | Without Numba | With Numba | Speedup |
 |------|--------------|------------|---------|
