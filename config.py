@@ -249,6 +249,9 @@ ASYMPTOTIC_TIE_CORRECTION_MODE = "with_tie_correction"
 # "multipoint" (default, more accurate) or "single" (faster, ~3x less calibration cost)
 CALIBRATION_MODE = "multipoint"
 
+# Calibration samples per bisection (used by calibrate_rho, etc.). Increase for tighter accuracy.
+N_CAL = 300
+
 USE_NUMBA = True
 VECTORIZE_DATA_GENERATION = True
 BATCH_CI_BOOTSTRAP = True

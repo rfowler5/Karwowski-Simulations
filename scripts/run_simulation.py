@@ -28,7 +28,7 @@ if _pre_args.no_numba:
 import pandas as pd
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
-                    N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER,
+                    N_SIMS, N_BOOTSTRAP, N_CAL, ALPHA, TARGET_POWER,
                     POWER_SEARCH_DIRECTION, ASYMPTOTIC_TIE_CORRECTION_MODE,
                     CALIBRATION_MODE)
 from power_simulation import run_all_scenarios as mc_scenarios
@@ -113,7 +113,7 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
          tie_correction_mode=None, skip_linear=False, skip_copula=False,
          skip_nonparametric=False, skip_empirical=False, cases=None,
          n_distinct_values=None, dist_types=None, n_jobs=1, use_numba=None,
-         calibration_mode=None):
+         calibration_mode=None, n_cal=None):
     if use_numba is not None:
         config.USE_NUMBA = use_numba
     if n_sims is None:
@@ -126,6 +126,8 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         tie_correction_mode = ASYMPTOTIC_TIE_CORRECTION_MODE
     if calibration_mode is None:
         calibration_mode = CALIBRATION_MODE
+    if n_cal is None:
+        n_cal = N_CAL
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -160,7 +162,7 @@ def main(n_sims=None, n_boot=None, n_reps=None, seed=None, outdir="results",
         t0 = time.time()
         pw = mc_scenarios(generator=gen, n_sims=n_sims, seed=seed,
                           n_jobs=n_jobs, calibration_mode=calibration_mode,
-                          **filter_kw)
+                          n_cal=n_cal, **filter_kw)
         _log(f"  {gen.title()} done in {time.time() - t0:.1f}s  "
              f"({len(pw)} scenarios)")
         all_power.extend(pw)
@@ -251,6 +253,8 @@ if __name__ == "__main__":
                         choices=["multipoint", "single"],
                         default=None,
                         help="Calibration mode (default: multipoint)")
+    parser.add_argument("--n-cal", type=int, default=None,
+                        help=f"Calibration samples per bisection (default: {N_CAL})")
     parser.add_argument("--no-numba", action="store_true",
                         help="Disable Numba JIT (use pure NumPy fallback)")
     parser.add_argument("--numba", action="store_true",
@@ -272,4 +276,4 @@ if __name__ == "__main__":
          n_distinct_values=_parse_int_list(args.n_distinct) if args.n_distinct else None,
          dist_types=_parse_str_list(args.dist_types) if args.dist_types else None,
          n_jobs=args.n_jobs, use_numba=_use,
-         calibration_mode=args.calibration_mode)
+         calibration_mode=args.calibration_mode, n_cal=args.n_cal)

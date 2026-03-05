@@ -57,7 +57,7 @@ if _pre_args.no_numba:
 import numpy as np
 from scipy.stats import spearmanr
 
-from config import (CASES, N_SIMS, N_BOOTSTRAP, ALPHA, TARGET_POWER,
+from config import (CASES, N_SIMS, N_BOOTSTRAP, N_CAL, ALPHA, TARGET_POWER,
                     ASYMPTOTIC_TIE_CORRECTION_MODE, CALIBRATION_MODE)
 from data_generator import generate_cumulative_aluminum, get_generator, digitized_available
 from power_simulation import estimate_power, min_detectable_rho, _search_directions
@@ -68,8 +68,10 @@ from power_asymptotic import (asymptotic_results, get_x_counts,
 
 def run_power(case_id, n_distinct, dist_type, generators, n_sims, seed,
               all_distinct=False, freq_dict=None, x_counts=None,
-              calibration_mode=None):
+              calibration_mode=None, n_cal=None):
     """Run min-detectable-rho for a single scenario."""
+    if n_cal is None:
+        n_cal = N_CAL
     case = CASES[case_id]
     n = case["n"]
     y_params = {"median": case["median"], "iqr": case["iqr"],
@@ -86,7 +88,8 @@ def run_power(case_id, n_distinct, dist_type, generators, n_sims, seed,
                 dist_type if not all_distinct else None,
                 y_params, generator=gen, n_sims=n_sims,
                 all_distinct=all_distinct, direction=d, seed=seed,
-                freq_dict=freq_dict, calibration_mode=calibration_mode)
+                freq_dict=freq_dict, calibration_mode=calibration_mode,
+                n_cal=n_cal)
             elapsed = time.time() - t0
             results.append({
                 "method": gen,
@@ -196,7 +199,7 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
          n_sims=500, n_boot=500, n_reps=20, seed=42, power_only=False,
          ci_only=False, skip_copula=False, skip_linear=False,
          skip_nonparametric=False, skip_empirical=False, verbose=True,
-         use_numba=None, calibration_mode=None):
+         use_numba=None, calibration_mode=None, n_cal=None):
     """Run power and/or CI for a single scenario.  Callable without CLI.
 
     Parameters
@@ -229,6 +232,8 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
         config.USE_NUMBA = use_numba
     if calibration_mode is None:
         calibration_mode = CALIBRATION_MODE
+    if n_cal is None:
+        n_cal = N_CAL
     case_data = CASES[case]
     n = case_data["n"]
 
@@ -291,7 +296,8 @@ def main(case, n_distinct=None, dist_type=None, freq=None, all_distinct=False,
         power_res = run_power(
             case, n_distinct, dist_type, generators, n_sims, seed,
             all_distinct=all_distinct, freq_dict=custom_freq_dict,
-            x_counts=custom_x_counts, calibration_mode=calibration_mode)
+            x_counts=custom_x_counts, calibration_mode=calibration_mode,
+            n_cal=n_cal)
 
     if not power_only:
         ci_res = run_ci(
@@ -334,6 +340,8 @@ if __name__ == "__main__":
                         choices=["multipoint", "single"],
                         default=None,
                         help="Calibration mode (default: multipoint)")
+    parser.add_argument("--n-cal", type=int, default=None,
+                        help=f"Calibration samples per bisection (default: {N_CAL})")
     parser.add_argument("--skip-copula", action="store_true")
     parser.add_argument("--skip-linear", action="store_true")
     parser.add_argument("--skip-nonparametric", action="store_true")
@@ -356,4 +364,4 @@ if __name__ == "__main__":
          skip_copula=args.skip_copula, skip_linear=args.skip_linear,
          skip_nonparametric=args.skip_nonparametric,
          skip_empirical=args.skip_empirical, use_numba=_use,
-         calibration_mode=args.calibration_mode)
+         calibration_mode=args.calibration_mode, n_cal=args.n_cal)
