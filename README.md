@@ -30,7 +30,7 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 1. **Minimum detectable correlation** -- the smallest |ρ| detectable with **80% power** at **α = 0.05**, for each case × tie structure × distribution shape.
 2. **Confidence intervals for observed rho** -- bootstrap and asymptotic CIs. These are the *expected* intervals under the model when the true correlation equals the observed rho, averaged over many simulated datasets, showing the plausible range of true correlations consistent with the data.
 
-**Note on search bounds:** The bisection for min detectable rho searches [0.25, 0.42] (positive) or [-0.42, -0.25] (negative). These bounds are tuned for the Karwowski study (n = 73-82, alpha = 0.05); for other applications they should be widened. The asymptotic search uses wider bounds [0, 0.6].
+**Note on search bounds:** The bisection for min detectable rho searches [0.25, 0.42] (positive) or [-0.42, -0.25] (negative). These bounds are tuned for the Karwowski study (n = 73-82, α = 0.05); for other applications they should be widened. The asymptotic search uses wider bounds [0, 0.6].
 
 ## Assumptions
 
@@ -109,7 +109,13 @@ Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for
 
 **Conversion:** $`\rho_p = 2\sin(\pi \rho_s/6)`$ (exact Spearman–Pearson for the bivariate normal). See `data_generator._spearman_to_pearson`.
 
-**Steps:** (1) x → ranks (average) → $`u_x = (\text{ranks}-0.5)/n`$, small jitter to break ties → $`z_x = \Phi^{-1}(u_x)`$; (2) draw $`z_y = \rho_p z_x + \sqrt{1-\rho_p^2} Z`$; $`u_y = \Phi(z_y)`$; (3) $`y = F_{\ln}^{-1}(u_y)`$ with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
+**Steps:** (1) x → ranks (average) → $`u_x = (\text{ranks}-0.5)/n`$, small jitter to break ties → $`z_x = \Phi^{-1}(u_x)`$; (2) draw
+
+```math
+z_y = \rho_p z_x + \sqrt{1-\rho_p^2} Z
+```
+
+; $`u_y = \Phi(z_y)`$; (3) $`y = F_{\ln}^{-1}(u_y)`$ with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
 
 **With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at $`\rho_s = 0.30`$ (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
 
@@ -159,13 +165,13 @@ A different design would be to treat the **pool as the population** and, each si
 
 ### Asymptotic
 
-Closed-form expressions (no simulation). Power uses the non-central t-distribution with df = n-2 and Fieller-Hartley-Pearson tie correction for x only. CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)); ties handled via FHP for x only (see [Tie correction](#tie-correction-fieller-hartley-pearson)). Fast and stable, serves as a cross-check against the Monte Carlo methods.
+Closed-form expressions (no simulation). Power uses the non-central t-distribution with df = $`n-2`$ and Fieller-Hartley-Pearson tie correction for x only. CIs use the Fisher z-transform with Bonett-Wright SE = $`\sqrt{1.06/(n-3)}`$; ties handled via FHP for x only (see [Tie correction](#tie-correction-fieller-hartley-pearson)). Fast and stable, serves as a cross-check against the Monte Carlo methods.
 
 ### P-value method (power simulation)
 
 Power simulation uses **permutation-based p-values** instead of the t-approximation, because the t-approximation is unreliable with heavy ties. Two paths:
 
-- **Non-empirical generators** (nonparametric, copula, linear): A **precomputed null** distribution of Spearman rhos is built once per (n, tie structure) and cached. P-values are computed by binary search against sorted |null_rho|. On first use for a scenario (~1s for n≈80, 50k null samples), the null is built and cached; subsequent calls reuse it. Optional: call `permutation_pvalue.warm_precomputed_null_cache()` to pre-build nulls for all scenarios before long runs.
+- **Non-empirical generators** (nonparametric, copula, linear): A **precomputed null** distribution of Spearman rhos is built once per (n, tie structure) and cached. P-values are computed by binary search against sorted $`|\rho_{\mathrm{null}}|`$. On first use for a scenario (~1s for $`n \approx 80`$, 50k null samples), the null is built and cached; subsequent calls reuse it. Optional: call `permutation_pvalue.warm_precomputed_null_cache()` to pre-build nulls for all scenarios before long runs.
 - **Empirical generator:** Y may have ties that vary per dataset, so a single precomputed null is not applicable. The code uses **per-dataset Monte Carlo** permutation p-values with adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba. When n_sims exceeds a threshold (default 5k), sims are processed in chunks (default 2k) to cap memory (see [Memory (Monte Carlo p-value)](#memory-monte-carlo-p-value-batching) below).
 
 Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for power (e.g. for comparison or tests). For the full equations (precomputed null construction, binary-search p-value, per-dataset MC, fallback t-approximation) and the **MC-on-cache-miss** option, see [Statistical methods](#statistical-methods) below.
@@ -197,13 +203,31 @@ Power = proportion of sims with p < α.
 
 ### Asymptotic power (non-central t)
 
-- **Noncentrality (all-distinct):** $`\mathrm{nc} = \rho_{\mathrm{true}} \sqrt{n-2} / \sqrt{1 - \rho_{\mathrm{true}}^2}`$. Power = $`P(|T| > t_{\mathrm{crit}})`$ for $`T \sim`$ noncentral $`t`$(df = $`n-2`$, nc).
-- **Tie adjustment (FHP):** When ties are present, nc is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{noties}} / \mathrm{var}_0^{\mathrm{ties}}}`$ (see FHP below).
+- **Noncentrality (all-distinct):**
+
+```math
+\mathrm{nc} = \rho_{\mathrm{true}} \sqrt{n-2} / \sqrt{1 - \rho_{\mathrm{true}}^2}
+```
+
+Power = $`P(|T| > t_{\mathrm{crit}})`$ for $`T \sim`$ noncentral $`t`$(df = $`n-2`$, nc).
+- **Tie adjustment (FHP):** When ties are present, nc is scaled by
+
+```math
+\sqrt{\mathrm{var}_0^{\mathrm{no ties}} / \mathrm{var}_0^{\mathrm{ties}}}
+```
+
+(see FHP below).
 - **Removed factor (historical note):** A previous AI-generated version of this code multiplied nc by an additional $`\sqrt{1/1.06}`$ in the tie-correction branch, attempting to account for the Bonett-Wright efficiency loss (the 1.06 factor used in the CI formula). No published source justifies applying this factor to the noncentrality parameter; the 1.06 is specific to the Fisher z standard error for confidence intervals and does not belong in the power formula. The factor has been removed. The Bonett-Wright 1.06 remains in `asymptotic_ci` where it is well-established.
 
 ### Asymptotic confidence interval
 
-$`z = \mathrm{arctanh}(\rho)`$; SE in z-space = $`\sqrt{1.06/(n-3)}`$ (Bonett–Wright). With ties: $`\mathrm{SE}_z`$ scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{noties}}}`$. CI in z-space then back-transformed via tanh.
+$`z = \mathrm{arctanh}(\rho)`$; SE in z-space = $`\sqrt{1.06/(n-3)}`$ (Bonett–Wright). With ties: $`\mathrm{SE}_z`$ scaled by
+
+```math
+\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{no ties}}}
+```
+
+. CI in z-space then back-transformed via tanh.
 
 ### Fieller–Hartley–Pearson (FHP) variance under H₀
 
@@ -425,7 +449,7 @@ The Gaussian copula assumes continuous marginals for the rank-to-normal-to-rank 
 
 ### Why calibration?
 
-With tied x-values, the midrank representation has lower variance than distinct ranks. This means the rank-mixing formula `mixed = rho * s_x + sqrt(1-rho^2) * s_noise` produces a Spearman rho slightly below the target rho. The calibration step computes a rho-independent attenuation ratio by probing at a fixed rho (0.30) and using bisection over 300 samples. This ratio is then multiplied by any target rho to compensate for the attenuation. The ratio is cached per (n, k, dist_type), so the cost is ~3s per unique tie structure.
+With tied x-values, the midrank representation has lower variance than distinct ranks. This means the rank-mixing equation `mixed = rho * s_x + sqrt(1-rho^2) * s_noise` produces a Spearman rho slightly below the target rho. The calibration step computes a rho-independent attenuation ratio by probing at a fixed rho (0.30) and using bisection over 300 samples. This ratio is then multiplied by any target rho to compensate for the attenuation. The ratio is cached per (n, k, dist_type), so the cost is ~3s per unique tie structure.
 
 **If calibration fails for a custom tie structure:** Run `tests/test_calibration_accuracy.py` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
 
@@ -447,9 +471,21 @@ The arctanh transform stabilises the variance of the correlation coefficient and
 
 ### Tie correction (Fieller-Hartley-Pearson)
 
-The Fieller-Hartley-Pearson correction adjusts the **variance of Spearman rho under the null hypothesis (H0)** when ties are present in the rank data. Ties reduce the effective rank information (e.g., many observations sharing the same x-value), so the sampling variance of rho increases. The correction uses the standard formula: define Tx = Σ(tᵢ³ − tᵢ) over tie groups in x (and Ty for y), Dx = (n³−n − Tx)/12, Dy = (n³−n − Ty)/12; then Var(rho) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). When there are no ties, Dx = Dy = (n³−n)/12 and this reduces to 1/(n−1).
+The Fieller-Hartley-Pearson correction adjusts the **variance of Spearman rho under the null hypothesis (H0)** when ties are present in the rank data. Ties reduce the effective rank information (e.g., many observations sharing the same x-value), so the sampling variance of rho increases. The correction uses the standard equation: define Tx = Σ(tᵢ³ − tᵢ) over tie groups in x (and Ty for y), Dx = (n³−n − Tx)/12, Dy = (n³−n − Ty)/12; then Var(rho) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). When there are no ties, Dx = Dy = (n³−n)/12 and this reduces to 1/(n−1).
 
-**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{noties}} / \mathrm{var}_0^{\mathrm{ties}}}`$, reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by $`\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{noties}}}`$, widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
+**Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by
+
+```math
+\sqrt{\mathrm{var}_0^{\mathrm{no ties}} / \mathrm{var}_0^{\mathrm{ties}}}
+```
+
+, reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by
+
+```math
+\sqrt{\mathrm{var}_0^{\mathrm{ties}} / \mathrm{var}_0^{\mathrm{no ties}}}
+```
+
+, widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
 
 **Approximation note:** The combination of Bonett-Wright (1.06 in SE) with the FHP tie correction is a heuristic -- no single published reference validates applying both corrections simultaneously. Each is well-established individually; their product is a practical approximation.
 
@@ -519,7 +555,7 @@ These flags live in `config.py`: `VECTORIZE_DATA_GENERATION`, `BATCH_CI_BOOTSTRA
 
 When using the **Monte Carlo p-value path** (empirical generator, or any generator with permutation enabled), peak memory is dominated by: (1) permutation indices `perm_idx_all` of shape (n_perm, n_sims, n) int32 → 4 × n_perm × n_sims × n bytes; (2) permutation rhos (n_sims, n_perm) float64 → 8 × n_sims × n_perm bytes. Data `x_all`, `y_all` are smaller by comparison.
 
-**Formula:** Extra memory ≈ (4n + 8) × n_sims_chunk × n_perm bytes. For n ≈ 80: ≈ 328 × n_sims_chunk × n_perm bytes (e.g. 10k sims × 1k perms at n≈80 ≈ 3.3 GB for a full batch).
+**Equation:** Extra memory ≈ (4n + 8) × n_sims_chunk × n_perm bytes. For n ≈ 80: ≈ 328 × n_sims_chunk × n_perm bytes (e.g. 10k sims × 1k perms at n≈80 ≈ 3.3 GB for a full batch).
 
 **Chunking:** When n_sims > `PVALUE_N_SIMS_BATCH_THRESHOLD` (default 5k), sims are processed in chunks of `PVALUE_N_SIMS_CHUNK_SIZE` (default 2k). Peak memory is then for one chunk: e.g. 2k sims × 1k n_perm × n≈80 → ~660 MB per chunk.
 
@@ -534,14 +570,24 @@ When using the **Monte Carlo p-value path** (empirical generator, or any generat
 | 50k    | 1k     | chunked | ~660 MB per chunk |
 | 5k     | 2k     | full    | ~3.3 GB           |
 
-### Precision formulas
+### Equations to compute Precision
 
 For user-computed errors and planning n_sims / n_cal:
 
-- **Power estimate (binomial):** $`\hat{p}`$ = proportion of sims with p < α. $`\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}`$. For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}`$.
+- **Power estimate (binomial):** $`\hat{p}`$ = proportion of sims with p < α.
+
+```math
+\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}
+```
+
+For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}`$.
 - **Bisection contribution to SE(min ρ):** $`\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}`$ with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb $`\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}`$.
 - **Calibration contribution:** Calibration uncertainty scales as $`1/\sqrt{n_{\mathrm{cal}}}`$; propagates to min detectable ρ. $`\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}`$ (coefficient depends on scenario).
-- **Combined uncertainty (independent):** $`\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }`$.
+- **Combined uncertainty (independent):**
+
+```math
+\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }
+```
 - **95% CI half-width:** Half-width ≈ 1.96 × $`\mathrm{SE}_{\mathrm{total}}(\rho)`$. For target half-width w, aim for $`\mathrm{SE}_{\mathrm{total}} \leq w / 1.96`$.
 - **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
 
