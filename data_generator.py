@@ -137,8 +137,7 @@ else:
     known_b_al_outliers = None
 
 
-def generate_b_al_outliers(n_missing=5, low=B_AL_OUTLIER_MIN if _DIGITIZED_AVAILABLE else 98.0,
-                            high=B_AL_OUTLIER_MAX if _DIGITIZED_AVAILABLE else 952.0, rng=None):
+def generate_b_al_outliers(n_missing=5, low=None, high=None, rng=None):
     """
     Sample remaining B-Al outliers using log-uniform distribution
     (heavy-tailed, realistic for extreme biomarker values).
@@ -146,6 +145,10 @@ def generate_b_al_outliers(n_missing=5, low=B_AL_OUTLIER_MIN if _DIGITIZED_AVAIL
     if not _DIGITIZED_AVAILABLE:
         raise ImportError(
             "Digitized data not available. Create data/digitized.py or use --skip-empirical.")
+    if low is None:
+        low = B_AL_OUTLIER_MIN
+    if high is None:
+        high = B_AL_OUTLIER_MAX
     if rng is None:
         rng = np.random.default_rng()
 
@@ -153,29 +156,6 @@ def generate_b_al_outliers(n_missing=5, low=B_AL_OUTLIER_MIN if _DIGITIZED_AVAIL
     log_high = np.log(high)
     sampled = np.exp(rng.uniform(log_low, log_high, n_missing))
     return np.concatenate([known_b_al_outliers, sampled])
-
-def generate_empirical_y(n, exclude_outliers=True):
-    """
-    Generate Y values (H-Al and B-Al) by resampling from the 71 digitized points.
-    - exclude_outliers=True: use only the 71 core points (for n = 73 case)
-    - exclude_outliers=False: include the 7 B-Al outliers + 1 H-Al outlier (for n=80/82 cases)
-    """
-    if exclude_outliers:
-        # Resample from the 71 non-outlier points
-        idx = np.random.choice(len(H_AL71), size=n, replace=True)
-        h = H_AL71[idx]
-        b = B_AL71[idx]
-    else:
-        # Include outliers for full sample
-        outliers_b = generate_b_al_outliers(n_missing=5)  # 5 unknowns + 2 known = 7
-        full_h = np.append(H_AL71, H_AL_OUTLIER)
-        full_b = np.append(B_AL71, outliers_b)
-        idx = np.random.choice(len(full_h), size=n, replace=True)
-        h = full_h[idx]
-        b = full_b[idx]
-
-    return h, b
-
 
 # ---------------------------------------------------------------------------
 # Empirical pool construction
@@ -800,7 +780,6 @@ def _mean_rho_empirical(rho_in, template, pool, n_cal, seed):
         mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
 
         y_vals = np.sort(pool)
-        y_vals.sort()
         y_final = np.empty(nn)
         y_final[np.argsort(mixed)] = y_vals
 

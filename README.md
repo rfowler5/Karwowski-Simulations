@@ -30,9 +30,11 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 1. **Minimum detectable correlation** -- the smallest |ρ| detectable with **80% power** at **α = 0.05**, for each case × tie structure × distribution shape.
 2. **Confidence intervals for observed rho** -- bootstrap and asymptotic CIs. These are the *expected* intervals under the model when the true correlation equals the observed rho, averaged over many simulated datasets, showing the plausible range of true correlations consistent with the data.
 
+**Note on search bounds:** The bisection for min detectable rho searches [0.25, 0.42] (positive) or [-0.42, -0.25] (negative). These bounds are tuned for the Karwowski study (n = 73-82, alpha = 0.05); for other applications they should be widened. The asymptotic search uses wider bounds [0, 0.6].
+
 ## Assumptions
 
-- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR, or when using the empirical generator, via the **empirical distribution** (resampling from digitized Figure of Karwowski B-Al/H-Al data). Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so choosing a distribution of distinct values for generating y in our simulation is a good approximation. It should be noted though that those data points show B-Al follows a log-normal distribution, and so likely does to at N = 73, but the outliers likely shift it away from log-normal, but the H-Al data is not log-normal.
+- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR, or when using the empirical generator, via the **empirical distribution** (resampling from digitized Figure of Karwowski B-Al/H-Al data). Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. The log-normal is fitted using `q75 = median + IQR/2` (symmetric split of the reported IQR); for a truly log-normal distribution the split is asymmetric, so sigma is slightly underestimated. This has no effect on rank-based results since only the ordering of y matters. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so choosing a distribution of distinct values for generating y in our simulation is a good approximation. It should be noted though that those data points show B-Al follows a log-normal distribution, and so likely does to at N = 73, but the outliers likely shift it away from log-normal, but the H-Al data is not log-normal.
 
 - **Tie structure distributions:** Three frequency distributions (`even`, `heavy_tail`, `heavy_center`) are tested for sensitivity; differences across them are small, which is reassuring given unavailable raw data. `heavy_center` is considered most plausible for real vaccination schedules: most children followed the schedule and would be clustered in the middle for ages 9–13 months, with the middle 50% under 12 months. More realistic skewed patterns have also been explored but are currently undocumented here (e.g., for k=4 distinct values: only 2–5 observations in the tails, heavy concentration in the second value, and substantial but lower counts in the third). Users can test custom frequencies with `scripts/run_single_scenario.py --freq`.
 
@@ -107,7 +109,7 @@ Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for
 
 **Steps:** (1) x → ranks (average) → u_x = (ranks−0.5)/n, small jitter to break ties → z_x = Φ⁻¹(u_x); (2) draw z_y = ρ_p z_x + √(1−ρ_p²) Z; u_y = Φ(z_y); (3) y = F_ln⁻¹(u_y) with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
 
-**With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at ρ_s = 0.30 (cached per scenario) compensates.
+**With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at ρ_s = 0.30 (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
 
 **Limitation**: When x has heavy ties, the jittering step that breaks tied ranks collapses rank information and attenuates the realised Spearman rho, leading to underestimated power. Alternatives tested — distributional transform (random uniform within each tie group's CDF band) and adaptive jitter (scaling jitter by tie group size) — improved the mild cases (k=10) but still failed the 0.01 accuracy threshold for heavy ties (k=4). This is a fundamental limitation of the continuous-marginals assumption. The method is retained for comparison purposes and works reliably when there are no ties; with heavy ties, calibration helps compensate for the rank information loss. It applies single-point calibration (probe at rho = 0.30) and is **not** the default method.
 
@@ -155,7 +157,7 @@ A different design would be to treat the **pool as the population** and, each si
 
 ### Asymptotic
 
-Closed-form expressions (no simulation). Power uses the non-central t-distribution with df = n-2 and Fieller-Hartley-Pearson tie correction for x only, including the √(1/1.06) factor in the noncentrality (see [Statistical methods](#statistical-methods) for details). CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)); ties handled via FHP for x only (see [Tie correction](#tie-correction-fieller-hartley-pearson)). Fast and stable, serves as a cross-check against the Monte Carlo methods.
+Closed-form expressions (no simulation). Power uses the non-central t-distribution with df = n-2 and Fieller-Hartley-Pearson tie correction for x only. CIs use the Fisher z-transform with Bonett-Wright SE = sqrt(1.06/(n-3)); ties handled via FHP for x only (see [Tie correction](#tie-correction-fieller-hartley-pearson)). Fast and stable, serves as a cross-check against the Monte Carlo methods.
 
 ### P-value method (power simulation)
 
@@ -195,7 +197,7 @@ Power = proportion of sims with p < α.
 
 - **Noncentrality (all-distinct):** nc = ρ_true √(n−2) / √(1 − ρ_true²). Power = P(|T| > t_crit) for T ~ noncentral t(df = n−2, nc).
 - **Tie adjustment (FHP):** When ties are present, nc is scaled by √(var₀^noties / var₀^ties) (see FHP below).
-- **Extra factor in code:** The implementation additionally multiplies nc by **√(1/1.06)** (`power_asymptotic.asymptotic_power`, tie-correction branch). The 1.06 factor is from Bonett & Wright (2000) for the **Fisher z standard error (confidence intervals)**. No published source has been identified that justifies applying this factor to the **noncentrality parameter** in the power equation. It is included for consistency with the CI efficiency loss; this may warrant review.
+- **Removed factor (historical note):** A previous AI-generated version of this code multiplied nc by an additional **√(1/1.06)** in the tie-correction branch, attempting to account for the Bonett-Wright efficiency loss (the 1.06 factor used in the CI formula). No published source justifies applying this factor to the noncentrality parameter; the 1.06 is specific to the Fisher z standard error for confidence intervals and does not belong in the power formula. The factor has been removed. The Bonett-Wright 1.06 remains in `asymptotic_ci` where it is well-established.
 
 ### Asymptotic confidence interval
 
@@ -425,13 +427,17 @@ With tied x-values, the midrank representation has lower variance than distinct 
 
 **If calibration fails for a custom tie structure:** Run `tests/test_calibration_accuracy.py` on the new structure. If mean realised rho deviates from target by >0.01, try increasing `n_cal` (e.g. 300 → 500 or 1000) or use **multipoint calibration** (default). Multipoint probes at 0.10, 0.30, 0.50 and interpolates, fixing nonlinear attenuation. Use `--calibration-mode single` for faster runs when accuracy is less critical. If even rho_input=0.999 cannot reach the probe, the tie structure has hit a structural ceiling (maximum achievable |rho|) and the method cannot reach that target.
 
+Calibration uses a fixed internal seed (99) for reproducibility; the same (n, k, dist_type) always produces the same calibration ratio regardless of the caller's seed.
+
+With the default `n_cal=300`, calibration accuracy (SE of mean rho) is approximately 0.005-0.006, adequate for the ~0.01 target. Increase `n_cal` to 500-1000 for tighter accuracy.
+
 ### Why Bonett-Wright SE (1.06 factor)?
 
-The standard Fisher z-transform SE for Pearson r is `sqrt(1/(n-3))`. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = `sqrt(1.06/(n-3))`. The theoretical asymptotic variance factor for Spearman rho (no ties) is π²/9 ≈ 1.0966; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation and the note on 1.06 in the power noncentrality, see [Statistical methods](#statistical-methods).
+The standard Fisher z-transform SE for Pearson r is `sqrt(1/(n-3))`. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = `sqrt(1.06/(n-3))`. The theoretical asymptotic variance factor for Spearman rho (no ties) is π²/9 ≈ 1.0966; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation, see [Statistical methods](#statistical-methods). Note: a previous version also applied √(1/1.06) to the asymptotic power noncentrality parameter; this was an AI-generated fudge factor not supported by the literature and has been removed.
 
 ### Why non-central t for power?
 
-The Spearman test statistic `t = rho * sqrt(n-2) / sqrt(1 - rho^2)` follows a non-central t-distribution under the alternative. This is more accurate than the normal approximation (which uses constant H0 variance) because the `sqrt(1 - rho^2)` denominator captures the variance reduction as |rho| grows toward 1. For the noncentrality equation, tie adjustment, and the note on the 1.06 factor in power, see [Statistical methods](#statistical-methods).
+The Spearman test statistic `t = rho * sqrt(n-2) / sqrt(1 - rho^2)` follows a non-central t-distribution under the alternative. This is more accurate than the normal approximation (which uses constant H0 variance) because the `sqrt(1 - rho^2)` denominator captures the variance reduction as |rho| grows toward 1. For the noncentrality equation and tie adjustment, see [Statistical methods](#statistical-methods).
 
 ### Why Fisher z-transform for CIs?
 
@@ -442,6 +448,8 @@ The arctanh transform stabilises the variance of the correlation coefficient and
 The Fieller-Hartley-Pearson correction adjusts the **variance of Spearman rho under the null hypothesis (H0)** when ties are present in the rank data. Ties reduce the effective rank information (e.g., many observations sharing the same x-value), so the sampling variance of rho increases. The correction uses the standard formula: define Tx = Σ(tᵢ³ − tᵢ) over tie groups in x (and Ty for y), Dx = (n³−n − Tx)/12, Dy = (n³−n − Ty)/12; then Var(rho) = (1/(n−1)) × (n³−n)²/(144·Dx·Dy). When there are no ties, Dx = Dy = (n³−n)/12 and this reduces to 1/(n−1).
 
 **Where it is used:** (1) **Asymptotic power** — the noncentrality parameter is scaled by √(var_no_ties / var_ties), reducing effective power when ties inflate variance. (2) **Asymptotic CI** — the standard error in z-space is scaled by √(var_ties / var_no_ties), widening the interval appropriately. The impact on SE ranges from negligible (k=10, even: +0.5%) to moderate (k=4, heavy_center: +5.7%). **Asymptotic power and CI apply FHP for x only:** only the x tie structure is used; y is treated as having no ties in the asymptotic formulas (only `x_counts` is passed; `y_counts` is not used). See [Statistical methods](#statistical-methods) for the full FHP equation and this convention.
+
+**Approximation note:** The combination of Bonett-Wright (1.06 in SE) with the FHP tie correction is a heuristic -- no single published reference validates applying both corrections simultaneously. Each is well-established individually; their product is a practical approximation.
 
 ## Bootstrap CI
 
@@ -528,11 +536,11 @@ When using the **Monte Carlo p-value path** (empirical generator, or any generat
 
 For user-computed errors and planning n_sims / n_cal:
 
-- **Power estimate (binomial):** \(\hat{p}\) = proportion of sims with p < α. \(\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}\). For power near 0.80, \(\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}\).
-- **Bisection contribution to SE(min ρ):** \(\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}\) with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb \(\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}\).
-- **Calibration contribution:** Calibration uncertainty scales as \(1/\sqrt{n_{\mathrm{cal}}}\); propagates to min detectable ρ. \(\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}\) (coefficient depends on scenario).
-- **Combined uncertainty (independent):** \(\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }\).
-- **95% CI half-width:** Half-width ≈ 1.96 × \(\mathrm{SE}_{\mathrm{total}}(\rho)\). For target half-width w, aim for \(\mathrm{SE}_{\mathrm{total}} \leq w / 1.96\).
+- **Power estimate (binomial):** $\hat{p}$ = proportion of sims with p < α. $\mathrm{SE}(\hat{p}) = \sqrt{\hat{p}(1-\hat{p}) / n_{\mathrm{sims}}}$. For power near 0.80, $\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}$.
+- **Bisection contribution to SE(min ρ):** $\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}$ with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb $\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}$.
+- **Calibration contribution:** Calibration uncertainty scales as $1/\sqrt{n_{\mathrm{cal}}}$; propagates to min detectable ρ. $\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}$ (coefficient depends on scenario).
+- **Combined uncertainty (independent):** $\mathrm{SE}_{\mathrm{total}}(\rho) \approx \sqrt{ \mathrm{SE}_{\mathrm{bisection}}^2 + \mathrm{SE}_{\mathrm{cal}}^2 }$.
+- **95% CI half-width:** Half-width ≈ 1.96 × $\mathrm{SE}_{\mathrm{total}}(\rho)$. For target half-width w, aim for $\mathrm{SE}_{\mathrm{total}} \leq w / 1.96$.
 - **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
 
 ### Benchmark data (CI bootstrap)

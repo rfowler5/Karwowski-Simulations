@@ -132,8 +132,15 @@ def asymptotic_power(n, rho_true, alpha=None, x_counts=None,
     if tie_correction and x_counts is not None:
         var0_ties = spearman_var_h0(n, x_counts=x_counts, tie_correction=True)
         var0_no_ties = 1.0 / (n - 1)
-        # Scale nc by sqrt(1/1.06); 1.06 is from Bonett–Wright for Fisher z (CI). Not verified in literature for power; see README.
-        nc *= np.sqrt(var0_no_ties / var0_ties)*np.sqrt(1/1.06)
+        # FHP tie correction: inflate nc for reduced rank information.
+        # A previous version also multiplied nc by sqrt(1/1.06) here,
+        # attempting to account for the Bonett-Wright efficiency loss
+        # (1.06 factor) used in the CI formula. That factor was
+        # AI-generated and not justified by any published source for
+        # the noncentrality parameter; it has been removed. The 1.06
+        # factor remains in asymptotic_ci where Bonett-Wright intended
+        # it. See README "Why Bonett-Wright SE" for details.
+        nc *= np.sqrt(var0_no_ties / var0_ties)
 
 
     if two_sided:

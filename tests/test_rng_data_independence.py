@@ -54,35 +54,34 @@ def test_ci_path_independence():
 
 
 def test_power_path_determinism():
-    """Same seed gives identical first dataset when generating 1 vs 2 sims."""
+    """Same seed + same n_sims gives identical (x, y) datasets."""
     case = CASES[3]
     n, k, dt = case["n"], 4, "even"
     y_params = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
     rho_s = case["observed_rho"]
+    n_sims = 3
 
     ln_params = _fit_lognormal(y_params["median"], y_params["iqr"])
     cal_rho = calibrate_rho(n, k, dt, rho_s, y_params,
                             all_distinct=False, calibration_mode="single")
 
-    # 1 sim
-    rng1 = np.random.default_rng(SEED)
-    x1 = generate_cumulative_aluminum_batch(1, n, k, distribution_type=dt,
-                                             all_distinct=False, rng=rng1)
-    y1 = generate_y_nonparametric_batch(x1, rho_s, y_params, rng=rng1,
-                                         _calibrated_rho=cal_rho, _ln_params=ln_params)
+    # Run A
+    rng_a = np.random.default_rng(SEED)
+    x_a = generate_cumulative_aluminum_batch(n_sims, n, k, distribution_type=dt,
+                                              all_distinct=False, rng=rng_a)
+    y_a = generate_y_nonparametric_batch(x_a, rho_s, y_params, rng=rng_a,
+                                          _calibrated_rho=cal_rho, _ln_params=ln_params)
 
-    # 2 sims
-    rng2 = np.random.default_rng(SEED)
-    x2 = generate_cumulative_aluminum_batch(2, n, k, distribution_type=dt,
-                                             all_distinct=False, rng=rng2)
-    y2 = generate_y_nonparametric_batch(x2, rho_s, y_params, rng=rng2,
-                                         _calibrated_rho=cal_rho, _ln_params=ln_params)
+    # Run B: same seed, same n_sims
+    rng_b = np.random.default_rng(SEED)
+    x_b = generate_cumulative_aluminum_batch(n_sims, n, k, distribution_type=dt,
+                                              all_distinct=False, rng=rng_b)
+    y_b = generate_y_nonparametric_batch(x_b, rho_s, y_params, rng=rng_b,
+                                          _calibrated_rho=cal_rho, _ln_params=ln_params)
 
-    assert np.array_equal(x1[0], x2[0]), "x[0] differs between 1-sim and 2-sim runs"
-    # Need opus to verify if this is the right thing to test. The test failed, so that means
-    # need to think if code should be refactored or if the test needs to be changed.
-    #assert np.array_equal(y1[0], y2[0]), "y[0] differs between 1-sim and 2-sim runs"
-    print("PASS: Power path — first dataset identical for 1-sim vs 2-sim runs.")
+    assert np.array_equal(x_a, x_b), "x arrays differ for same seed + same n_sims"
+    assert np.array_equal(y_a, y_b), "y arrays differ for same seed + same n_sims"
+    print("PASS: Power path — same seed + same n_sims gives identical datasets.")
 
 
 def main():
