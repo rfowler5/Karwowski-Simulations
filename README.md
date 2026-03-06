@@ -425,6 +425,9 @@ Results are saved to the `results/` directory:
 - `run_simulation.py` — Main orchestrator / CLI entry point
 - `run_single_scenario.py` — Quick single-scenario testing script
 - `warm_up_numba.py` — Pre-compile Numba JIT cache
+- `estimate_bisection_c.py` — Estimate bisection coefficient *c* for planning n_sims
+- `estimate_calibration_k.py` — Estimate calibration coefficient *k* for planning n_cal
+- `estimate_interrep_sd.py` — Estimate inter-rep SD of CI endpoints for planning n_reps
 
 **benchmarks/** — Runtime benchmarks (run one at a time)
 - `benchmark_power.py` — Power: vectorize vs scalar, calibration modes
@@ -455,7 +458,24 @@ With tied x-values, the midrank representation has lower variance than distinct 
 
 Calibration uses a fixed internal seed (99) for reproducibility; the same (n, k, dist_type) always produces the same calibration ratio regardless of the caller's seed.
 
-With the default `n_cal=300`, calibration accuracy (SE of mean rho) is approximately 0.005-0.006, adequate for the ~0.01 target. Increase `n_cal` to 500-1000 for tighter accuracy.
+With the default `n_cal=300`, calibration accuracy (SE of mean rho) is approximately 0.005–0.006, adequate for the ~0.01 target. The planning formula is $`\mathrm{SE}_{\mathrm{cal}} = k/\sqrt{n_{\mathrm{cal}}}`$ where **k** is the SD of a single realised Spearman rho in the calibration process.
+
+**Analytical k (Bonett-Wright).** Each calibration draw computes one sample Spearman rho from *n* observations. By the [Bonett-Wright SE](#why-bonett-wright-se-106-factor) (the same one used for CIs), the SD of the sample Spearman rho at true $`\rho`$ is obtained via the delta method on the Fisher z-transform:
+
+```math
+k = (1 - \rho^2)\,\sqrt{\frac{1.06}{n - 3}}
+```
+
+where $`\rho`$ is the Spearman rho at the calibration probe (default 0.30). For the four study cases at $`\rho = 0.30`$:
+
+| Case | n | k (analytical) | SE at n_cal=300 | SE at n_cal=1000 |
+|------|---|---|---|---|
+| 1 | 80 | 0.107 | 0.0062 | 0.0034 |
+| 2 | 82 | 0.105 | 0.0061 | 0.0033 |
+| 3 | 73 | 0.112 | 0.0065 | 0.0035 |
+| 4 | 81 | 0.106 | 0.0061 | 0.0034 |
+
+**Empirical k** (from `scripts/estimate_calibration_k.py` at n_cal = 300, 500, 1000 with 200 replications for case 3) is approximately **0.10**, about 10% below the analytical value. The analytical formula is conservative because the BW asymptotic slightly overestimates variance for the rank-mixing mechanism, especially with ties. The benchmark scripts use **k = 0.112** (analytical worst case, n=73) and **c = 0.17** (asymptotic value at worst-case ρ*; empirical c for current data converges to ~0.12–0.15) for conservative estimates. Increase `n_cal` to 500–1000 for tighter accuracy.
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
@@ -499,27 +519,35 @@ Data generation and bootstrap resampling use **separate** RNG streams derived fr
 
 ### `n_reps`, SE, and reliability of the second decimal
 
-The CI endpoints vary across reps (inter-rep SD ≈ 0.10–0.11 for N=73, slightly lower for N=80+). The SE of the mean endpoint is SD/√`n_reps`. The 95% CI for the true mean is approximately ±1.96×SE.
+The CI endpoints vary across reps. The inter-rep SD is determined analytically: SD(endpoint) = (1 − endpoint²) × √(1.06/(n−3)), with FHP tie correction for x (up to +5.7% for k=4 heavy_center). The worst case is Case 3 (n=73, upper endpoint near 0): **0.122 no ties, 0.129 with worst-case ties** — giving a conservative $`\sigma_{\mathrm{rep}} \approx 0.13`$. Empirical max from `results/confidence_intervals.csv` (n_reps=200) is 0.130, confirming the analytical value. To re-estimate for new data: `scripts/estimate_interrep_sd.py --analytical --with-ties` (instant). The SE of the mean endpoint is $`\sigma_{\mathrm{rep}}/\sqrt{n_{\mathrm{reps}}}`$. The 95% CI for the true mean is approximately ±1.96×SE.
 
 | Target | SE | 95% CI half-width | `n_reps` | When it matters |
 |--------|-----|-------------------|--------|-----------------|
-| Borderline | 0.005 | ±0.01 | ≈400 | Second decimal can still be off by one unit |
-| Strong (README "reliable") | 0.0025 | ±0.005 | ≈1600 | Useful precision; fine when *not* near a rounding boundary |
-| Rounding guarantee | 0.00128 | ±0.0025 | ≈7400 | Needed only when the value is *near* a boundary (e.g. 0.345, 0.355) |
+| Borderline | 0.005 | ±0.01 | ≈650 | Second decimal can still be off by one unit |
+| Strong (README "reliable") | 0.0025 | ±0.005 | ≈2600 | Useful precision; fine when *not* near a rounding boundary |
+| Rounding guarantee | 0.00128 | ±0.0025 | ≈10200 | Needed only when the value is *near* a boundary (e.g. 0.345, 0.355) |
 
-**Rounding boundaries:** The boundary between rounding to 0.34 vs 0.35 is 0.345. With `n_reps`=1600 (95% CI ±0.005), if you observe 0.345 the CI spans [0.34, 0.35] and crosses the boundary—you cannot confidently round. When the value is not near a boundary (e.g. 0.32, 0.38), `n_reps`=1600 is adequate. The `n_reps`≈7400 "rounding guarantee" is only needed when you happen to land near a boundary and want confidence in which way to round.
+**Rounding boundaries:** The boundary between rounding to 0.34 vs 0.35 is 0.345. With `n_reps`=2600 (95% CI ±0.005), if you observe 0.345 the CI spans [0.34, 0.35] and crosses the boundary—you cannot confidently round. When the value is not near a boundary (e.g. 0.32, 0.38), `n_reps`=2600 is adequate. The `n_reps`≈10200 "rounding guarantee" is only needed when you happen to land near a boundary and want confidence in which way to round.
 
-With `n_reps`=200, SE ≈ 0.007 (worst case N=73), so the third decimal is uncertain and the second decimal is borderline. The default `n_reps`=200 is a practical trade-off.
+With `n_reps`=200, SE ≈ 0.009 (worst case N=73), so the third decimal is uncertain and the second decimal is borderline. The default `n_reps`=200 is a practical trade-off.
 
 ### `n_boot` choice (with high `n_reps`)
 
-Bootstrap quantile noise scales as $`1/\sqrt{n_{\mathrm{boot}}}`$ (with `n_boot` the number of bootstrap samples) and is negligible compared with inter-rep variability ($`\sigma_{\mathrm{inter}} \approx 0.11`$) when `n_reps` is high. With `n_reps` ≥ 1600:
+**Exact variance of the mean CI endpoint.** Each rep *i* produces one CI endpoint $`L_i`$ (e.g. the 2.5th percentile of `n_boot` bootstrap rhos). Its variance has two independent components: (1) inter-rep variability (different datasets), and (2) bootstrap quantile noise (finite `n_boot`). For the *p*-th sample quantile from `n_boot` i.i.d. draws, the asymptotic variance is $`p(1-p)/[n_{\mathrm{boot}}\, f(q_p)^2]`$, where $`f(q_p)`$ is the density of the bootstrap distribution at the quantile. For the 2.5th percentile, $`p(1-p) = 0.025 \times 0.975 = 0.024375`$. Averaging over `n_reps` independent reps:
+
+```math
+\mathrm{Var}(\bar{L}) = \frac{\sigma_{\mathrm{rep}}^2}{n_{\mathrm{reps}}} + \frac{0.024375}{n_{\mathrm{reps}}\, n_{\mathrm{boot}}\, f^2}
+```
+
+where $`\sigma_{\mathrm{rep}} \approx 0.13`$ (inter-rep SD, conservative worst case with ties; see [`n_reps`, SE, and reliability](#n_reps-se-and-reliability-of-the-second-decimal) above). The ratio of the bootstrap term to the inter-rep term is $`0.024375 / (n_{\mathrm{boot}} \, f^2 \, \sigma_{\mathrm{rep}}^2)`$. With $`n_{\mathrm{boot}} = 500`$ and a conservative $`f = 1`$, this ratio is $`0.024375 / (500 \times 1 \times 0.0169) \approx 0.003`$, so the bootstrap term adds **~0.3% to the variance** and **~0.15% to SE** — negligible. The benchmark scripts therefore use the approximation $`\mathrm{SE} \approx \sigma_{\mathrm{rep}} / \sqrt{n_{\mathrm{reps}}}`$ (see [Equations to compute Precision](#equations-to-compute-precision) for the full derivation and numerical comparison).
+
+With `n_reps` ≥ 2600:
 
 - **`n_boot`=200–400** suffices: bootstrap variance adds under 0.5% to total; 2.5th percentile estimated from 5–10 order statistics.
 - **`n_boot`=500** is comfortable; going higher gives no meaningful improvement.
 - **`n_boot`=1000** (default in `config.py`) is more than needed for high `n_reps`; use 200–500 to save time.
 
-When `n_reps`=200, **`n_boot`=500** is sufficient; the ~0.001–0.002 difference from n_boot=1000 is swamped by the ~0.007 SE from inter-rep variability.
+When `n_reps`=200, **`n_boot`=500** is sufficient; the ~0.001–0.002 difference from n_boot=1000 is swamped by the ~0.009 SE from inter-rep variability.
 
 ### Verifying `n_boot`
 
@@ -581,8 +609,28 @@ For user-computed errors and planning n_sims / n_cal:
 ```
 
 For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}}}`$.
-- **Bisection contribution to SE(min ρ):** $`\mathrm{SE}_{\mathrm{bisection}}(\rho) \approx c / \sqrt{n_{\mathrm{sims}}}`$ with c depending on the slope of the power curve (often c ≈ 0.15–0.2); rule of thumb $`\mathrm{SE}_{\mathrm{bisection}} \approx 0.16 / \sqrt{n_{\mathrm{sims}}}`$.
-- **Calibration contribution:** Calibration uncertainty scales as $`1/\sqrt{n_{\mathrm{cal}}}`$; propagates to min detectable ρ. $`\mathrm{SE}_{\mathrm{cal}}(\rho) \propto 1 / \sqrt{n_{\mathrm{cal}}}`$ (coefficient depends on scenario).
+- <a id="bisection-contribution-to-se"></a>**Bisection contribution to SE(min ρ):** By the implicit function theorem, bisection finds $`\rho^*`$ where $`\text{power}(\rho^*) = \pi_{\mathrm{target}}`$. The SE of the estimated root is:
+
+```math
+\mathrm{SE}_{\mathrm{bisection}}(\rho^*) = \frac{\sqrt{\pi(1-\pi)/n_{\mathrm{sims}}}}{|\text{power}'(\rho^*)|}  = \frac{c}{\sqrt{n_{\mathrm{sims}}}}, \qquad c \equiv \frac{\sqrt{\pi(1-\pi)}}{|\text{power}'(\rho^*)|}
+```
+
+This is a standard result in stochastic root-finding (e.g. Waeber, Frazier & Henderson 2013). The coefficient *c* depends on the slope of the power curve at the 80% crossing. For the asymptotic (no-tie) power function $`\text{power}(\rho) = \Phi(\mathrm{ncp}(\rho) - z_{\alpha/2})`$ where $`\mathrm{ncp} = \rho\sqrt{n-2}/\sqrt{1-\rho^2}`$:
+
+| n | $`\rho^*`$ (80% crossing) | slope | c |
+|---|---|---|---|
+| 73 | 0.316 | 2.76 | 0.145 |
+| 80 | 0.302 | 2.86 | 0.140 |
+| 82 | 0.299 | 2.88 | 0.139 |
+
+With ties (which attenuate rho, shifting the crossing to higher $`\rho^*`$ where the slope is shallower), c is modestly larger. From the actual min detectable rho values (0.28–0.34 across generators and scenarios), *c* ranges from approximately **0.12 to 0.15** when estimated at converged n_sims (≥5000). The benchmark **c = 0.17** is the asymptotic (no-tie) value at worst-case ρ* ≈ 0.33, providing ~20% margin above the empirical maximum (~0.15). At n_sims=2000 the finite-difference slope has high seed-dependent variance (*c* can range ~0.10–0.18); use n_sims ≥ 5000 in `scripts/estimate_bisection_c.py` for stable estimates. If you use different data or heavier ties, revisit precision parameters and re-run benchmarks; see [Precision when data changes](docs/PRECISION_WHEN_DATA_CHANGES.md).
+- **Calibration contribution:** Calibration uncertainty scales as $`1/\sqrt{n_{\mathrm{cal}}}`$; propagates to min detectable ρ. $`\mathrm{SE}_{\mathrm{cal}}(\rho) = k/\sqrt{n_{\mathrm{cal}}}`$ where the coefficient **k** is the SD of one calibration realised rho. From the Bonett-Wright asymptotic formula (the same one used for CIs, via the delta method on Fisher z):
+
+```math
+k = (1 - \rho^2)\,\sqrt{\frac{1.06}{n - 3}}
+```
+
+For $`\rho = 0.30`$ (the calibration probe), k ranges from **0.105** (n=82) to **0.112** (n=73) across the four cases; see the [table above](#why-calibration). Empirical k is ~10% lower (~0.10), making the formula a conservative upper bound. The benchmark scripts use **k = 0.112** (analytical worst case, n=73). To estimate k for a new scenario, run `scripts/estimate_calibration_k.py --analytical` (instant) or without `--analytical` for the empirical value.
 - **Combined uncertainty (independent):**
 
 ```math
@@ -590,6 +638,72 @@ For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}
 ```
 - **95% CI half-width:** Half-width ≈ 1.96 × $`\mathrm{SE}_{\mathrm{total}}(\rho)`$. For target half-width w, aim for $`\mathrm{SE}_{\mathrm{total}} \leq w / 1.96`$.
 - **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
+
+#### Permutation p-value noise in power estimates
+
+Power is estimated as $`\hat{\pi} = (1/n_{\mathrm{sims}}) \sum_i \mathbf{1}(\hat{p}_i < \alpha)`$, where each $`\hat{p}_i`$ is a permutation-based p-value computed from a finite null sample. With an infinite null, the reject decision $`\mathbf{1}(p_i < \alpha)`$ would be deterministic given the data; with a finite null of size $`n_{\mathrm{perm}}`$, there is additional randomness.
+
+**Exact variance decomposition.** For each simulation *i*, let $`p_i`$ be the exact (infinite-null) p-value and $`\hat{p}_i`$ the estimated p-value from $`n_{\mathrm{perm}}`$ null samples. The variance of $`\hat{p}_i`$ given the data is approximately $`\sigma_{\alpha}^2 = \alpha(1-\alpha)/n_{\mathrm{perm}}`$ for sims near the decision boundary. By the law of total variance:
+
+```math
+\mathrm{Var}(\hat{\pi}) = \frac{1}{n_{\mathrm{sims}}} \Big[\underbrace{\pi(1-\pi)}_{\text{Monte Carlo (data)}} + \underbrace{V_{\mathrm{perm}}}_{\text{permutation noise}}\Big]
+```
+
+where the permutation contribution $`V_{\mathrm{perm}} = \mathbb{E}[\Phi(z_i)(1 - \Phi(z_i))]`$ with $`z_i = (\alpha - p_i)/\sigma_\alpha`$. Only simulations with $`p_i \approx \alpha`$ contribute; for these, $`\Phi(z_i)(1-\Phi(z_i))`$ is non-negligible, while for $`p_i`$ far from $`\alpha`$ the term vanishes.
+
+**Bounding $`V_{\mathrm{perm}}`$.** For a continuous p-value distribution with density $`f_p(\cdot)`$ near $`\alpha`$:
+
+```math
+V_{\mathrm{perm}} \approx \frac{\sigma_\alpha \cdot f_p(\alpha)}{\sqrt{\pi}}
+```
+
+where $`\sigma_\alpha = \sqrt{\alpha(1-\alpha)/n_{\mathrm{perm}}}`$ and the constant $`1/\sqrt{\pi}`$ comes from $`\int_{-\infty}^{\infty}\Phi(u)(1-\Phi(u))\,du = 1/\sqrt{\pi}`$. The worst case is $`f_p(\alpha) = 1`$ (uniform p-values under the null); under the alternative with power $`\approx 0.80`$, most p-values are near 0, so $`f_p(\alpha) < 1`$.
+
+**Approximation used by benchmark scripts.** Since $`V_{\mathrm{perm}} \ll \pi(1-\pi)`$, the benchmark scripts use $`\mathrm{SE}(\hat{\pi}) \approx \sqrt{\pi(1-\pi)/n_{\mathrm{sims}}}`$, ignoring the permutation term.
+
+**Numerical comparison** ($`\alpha = 0.05`$, power $`\pi = 0.80`$, worst-case $`f_p(\alpha) = 1`$):
+
+| P-value path | $`n_{\mathrm{perm}}`$ | $`\sigma_\alpha`$ | $`V_{\mathrm{perm}}`$ | $`V / \pi(1-\pi)`$ | SE inflation |
+|---|---|---|---|---|---|
+| Precomputed null (non-empirical) | 50 000 | 0.00097 | 5.5 × 10⁻⁴ | 0.34% | +0.17% |
+| MC (empirical, $`n_{\mathrm{sims}} < 5\text{k}`$) | 2 000 | 0.00487 | 2.7 × 10⁻³ | 1.72% | +0.86% |
+| MC (empirical, $`n_{\mathrm{sims}} \geq 5\text{k}`$) | 1 000 | 0.00689 | 3.9 × 10⁻³ | 2.43% | +1.21% |
+
+Even in the worst case (MC path with `n_perm`=1000, uniform p-values), permutation noise inflates SE by only **~1.2%**. For the precomputed null (`n_pre`=50,000) used by the non-empirical generators, the inflation is **~0.17%**. Under realistic conditions ($`f_p(\alpha) < 1`$), the effect is even smaller. The approximation is therefore safe for all p-value paths.
+
+**Why `n_perm`=1,000 is adequate for all precision tiers (including empirical).** The empirical generator always uses the MC path (no precomputed null, because y-ties vary per dataset). The +1.2% worst-case SE inflation on power propagates through bisection: the SE of min detectable rho is $`\mathrm{SE}(\hat{\pi})/|\text{power}'(\rho^*)|`$ (see [Bisection contribution to SE](#bisection-contribution-to-se) above), so a +1.2% inflation of $`\mathrm{SE}(\hat{\pi})`$ becomes a +1.2% inflation of $`\mathrm{SE}(\rho^*)`$. For the ±0.01 target half-width, that is $`0.01 \times 0.012 = 0.00012`$ — negligible. Even for the ±0.001 tier it is $`0.001 \times 0.012 = 0.0000012`$. The adaptive `n_perm` (1,000 when `n_sims` ≥ 5,000; 2,000 otherwise) requires no adjustment.
+
+#### CI endpoint precision
+
+The reported CI endpoint is the mean of `n_reps` independent bootstrap-quantile estimates. Each rep *i* produces $`L_i`$ (e.g. the 2.5th percentile of `n_boot` bootstrap rho values). Its variance decomposes into two independent components:
+
+```math
+\mathrm{Var}(\bar{L}) = \underbrace{\frac{\sigma_{\mathrm{rep}}^2}{n_{\mathrm{reps}}}}_{\text{inter-rep}} + \underbrace{\frac{p(1-p)}{n_{\mathrm{reps}}\, n_{\mathrm{boot}}\, f(q_p)^2}}_{\text{bootstrap quantile noise}}
+```
+
+where $`\sigma_{\mathrm{rep}} \approx 0.13`$ is the inter-rep SD (analytical worst case with ties, N = 73; see [`n_reps`, SE, and reliability](#n_reps-se-and-reliability-of-the-second-decimal) above), $`p = 0.025`$ for the 2.5th percentile ($`p(1-p) = 0.024375`$), and $`f(q_p)`$ is the density of the bootstrap distribution at the quantile. The exact SE and 95% CI half-width are:
+
+```math
+\mathrm{SE}_{\mathrm{exact}} = \sqrt{\frac{\sigma_{\mathrm{rep}}^2}{n_{\mathrm{reps}}} + \frac{p(1-p)}{n_{\mathrm{reps}}\, n_{\mathrm{boot}}\, f^2}}, \qquad \text{Half-width} = 1.96 \times \mathrm{SE}_{\mathrm{exact}}
+```
+
+**Approximation used by benchmark scripts.** Since the bootstrap term is negligible for $`n_{\mathrm{boot}} \geq 500`$ (see below), the benchmark scripts drop it:
+
+```math
+\mathrm{SE}_{\mathrm{approx}} = \frac{\sigma_{\mathrm{rep}}}{\sqrt{n_{\mathrm{reps}}}}, \qquad n_{\mathrm{reps}} \approx \left(\frac{1.96 \times \sigma_{\mathrm{rep}}}{w}\right)^2
+```
+
+where *w* is the target 95% CI half-width.
+
+**Numerical comparison** ($`\sigma_{\mathrm{rep}} = 0.13`$, $`n_{\mathrm{boot}} = 500`$, conservative $`f = 1`$):
+
+| Target half-width | `n_reps` | SE (approx) | SE (exact) | Ratio | ΔHW |
+|--------------------|----------|-------------|------------|-------|-----|
+| ±0.01 | 649 | 0.005103 | 0.005109 | 1.0012 | 1.2 × 10⁻⁵ |
+| ±0.002 | 16 231 | 0.001020 | 0.001022 | 1.0015 | 3.9 × 10⁻⁶ |
+| ±0.001 | 64 923 | 0.000510 | 0.000511 | 1.0014 | 1.4 × 10⁻⁶ |
+
+The bootstrap term inflates SE by only **~0.15%** across all tiers — well below other sources of uncertainty (e.g. the $`f = 1`$ conservatism). The approximation is therefore safe.
 
 ### Benchmark data (CI bootstrap)
 
@@ -655,10 +769,10 @@ Numba JIT compilation speeds up the bootstrap and ranking loops. Pre-warm with `
 |------|--------------|------------|---------|
 | Single scenario CI (200 reps × 500 boot) | ~12s | ~3–5s | ~3× |
 | Single scenario power (500 sims, n_cal=300) | ~5s | ~2–3s | ~2× |
-| Full grid CI (88 scenarios, n_reps=7400, n_boot=500, n_jobs=1 batch) | ~2.5 h | ~20–45 min | ~4–8× |
+| Full grid CI (88 scenarios, n_reps=10200, n_boot=500, n_jobs=1 batch) | ~3.5 h | ~28–62 min | ~4–8× |
 | Full grid power (88 scenarios, n_sims=10k, n_cal=300, n_jobs=4) | ~30–60 min | ~5–12 min | ~4–6× |
 
-On a 16-vCPU cloud machine (e.g. Hetzner CPX51), full CI grid per generator (88 scenarios, n_reps=7400, n_boot=500, n_jobs=-1) completes in under 12 minutes with Numba and pre-warmed cache.
+On a 16-vCPU cloud machine (e.g. Hetzner CPX51), full CI grid per generator (88 scenarios, n_reps=10200, n_boot=500, n_jobs=-1) completes in under 17 minutes with Numba and pre-warmed cache.
 
 Copula and linear generators have similar per-sim cost but no calibration overhead. The asymptotic method is instantaneous.
 
@@ -669,32 +783,39 @@ Copula and linear generators have similar per-sim cost but no calibration overhe
 - Use `--n-sims 500` for exploratory runs (seconds to minutes) vs `10000` for production.
 - On a 4-logical-core machine (e.g. 2 physical cores with hyperthreading), `--n-jobs 4` or `-1` parallelizes across logical cores; for power and per-rep bootstrap CI this can roughly halve full-grid runtimes.
 - The calibration step adds ~3s (single-point) or ~9s (multipoint, default) per unique (N, k, distribution) tie structure on first run; cached thereafter and reused across all rho values. Use `--calibration-mode single` for faster exploratory runs.
-- Bootstrap CIs dominate total runtime when using many reps and resamples. With `--n-reps 200`, use `--n-boot 500` (bootstrap noise is negligible). With `--n-reps 1600` or higher, `--n-boot 200`–`400` suffices; `--n-boot 500` is comfortable. Use `--n-reps 20 --n-boot 500` for quick checks.
+- Bootstrap CIs dominate total runtime when using many reps and resamples. With `--n-reps 200`, use `--n-boot 500` (bootstrap noise is negligible). With `--n-reps 2600` or higher, `--n-boot 200`–`400` suffices; `--n-boot 500` is comfortable. Use `--n-reps 20 --n-boot 500` for quick checks.
 - Use `scripts/run_single_scenario.py` to test individual scenarios quickly before committing to a full run.
 - Filter scenarios with `--cases`, `--n-distinct`, `--dist-types` to reduce the grid.
 - Use `--skip-copula --skip-linear` to run only the recommended nonparametric + empirical + asymptotic methods. Use `--skip-empirical` when digitized data is unavailable.
 
 ## Benchmark scripts
 
-Four scripts measure performance of the main optimisations (vectorized data generation, batch CI bootstrap). Run scripts one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
+Six scripts measure performance of the main optimisations (vectorized data generation, batch CI bootstrap) and precision/runtime planning. Run scripts one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
 
 | Script | Purpose |
 |--------|---------|
+| `benchmarks/benchmark_precision_params.py` | **Precision only:** Computes (n_sims, n_cal) and (n_reps, n_boot) for ±0.01, ±0.002, ±0.001 accuracy tiers from README formulas. No long runs. |
+| `benchmarks/benchmark_realistic_runtimes.py` | **Runtimes:** Per-generator power and CI at small params; sequential and parallel full grid; scaled to three precision tiers; best-config combined table and high-core estimates. `--quick` single-scenario only; `--skip-parallel` skips n_jobs=-1; `--generators all` or comma-separated list (e.g. nonparametric, empirical). |
 | `benchmarks/benchmark_batch_vs_no_batch.py` | Single scenario: per-rep bootstrap vs batch bootstrap. Case 3, k=4, even, n_reps=200, n_boot=1000. |
 | `benchmarks/benchmark_full_grid.py` | Full 88-scenario CI grid: per-rep vs batch bootstrap, sequential vs parallel, and Numba thread variants. Uses n_reps=200, n_boot=1000. |
 | `benchmarks/benchmark_ci_bootstrap.py` | Batch CI bootstrap: multipoint vs single-point calibration. Single scenario and 22-scenario subset. `--quick` runs only single-scenario (~1 min). |
 | `benchmarks/benchmark_power.py` | Power simulation: vectorized vs scalar data generation, multipoint vs single calibration, sequential vs parallel full grid. `--quick` skips full grid. |
 
 ```bash
+# Precision params only (no simulation)
+python benchmarks/benchmark_precision_params.py
+
 # Quick single-scenario comparisons
 python benchmarks/benchmark_batch_vs_no_batch.py
 python benchmarks/benchmark_ci_bootstrap.py --quick
 python benchmarks/benchmark_power.py --quick
+python benchmarks/benchmark_realistic_runtimes.py --quick --skip-parallel
 
 # Full benchmarks (several minutes each)
 python benchmarks/benchmark_full_grid.py
 python benchmarks/benchmark_ci_bootstrap.py
 python benchmarks/benchmark_power.py
+python benchmarks/benchmark_realistic_runtimes.py
 ```
 
 See `docs/BENCHMARKING_FINDINGS.md` for detailed results, decomposition of joblib vs Numba overhead, nested parallelism, memory notes, and verification scripts in `tests/` (`test_batch_bootstrap_ci.py`, `test_nested_parallelism.py`, `test_batch_sequential_vs_parallel.py`).
@@ -722,7 +843,7 @@ from confidence_interval_calculator import run_all_ci_scenarios
 for gen in ["nonparametric", "copula", "linear", "empirical"]:
     t0 = time.time()
     print(f"Starting {gen}...")
-    res = run_all_ci_scenarios(generator=gen, n_reps=7400, n_boot=500, n_jobs=-1, seed=42)
+    res = run_all_ci_scenarios(generator=gen, n_reps=10200, n_boot=500, n_jobs=-1, seed=42)
     with open(f"ci_{gen}.pkl", "wb") as f: pickle.dump(res, f)
     print(f"{gen} done in {time.time()-t0:.1f} s")
 '

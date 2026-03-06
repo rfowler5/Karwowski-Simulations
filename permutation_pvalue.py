@@ -189,7 +189,7 @@ def pvalues_mc(x_all, y_all, n_perm, alpha, rng,
     else:
         # Chunk processing with deterministic child RNG streams
         n_chunks = (n_sims + n_sims_chunk_size - 1) // n_sims_chunk_size
-        child_seeds = rng.bit_generator.seed_seq.spawn(n_chunks)
+        child_seeds = np.random.SeedSequence(rng.integers(2**63)).spawn(n_chunks)
         pvals = np.empty(n_sims, dtype=np.float64)
 
         for chunk_idx in range(n_chunks):

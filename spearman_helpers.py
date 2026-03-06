@@ -59,9 +59,11 @@ if _NUMBA_AVAILABLE:
         cov = np.mean((rx - mx) * (ry - my))
         varx = np.mean((rx - mx) ** 2)
         vary = np.mean((ry - my) ** 2)
-        if varx < 1e-15 or vary < 1e-15:
+        denom = np.sqrt(varx * vary)
+        if denom < 1e-15:
             return 0.0
-        return cov / np.sqrt(varx * vary)
+        r = cov / denom
+        return max(-1.0, min(1.0, r))
 
     @njit(fastmath=True, cache=True, parallel=True)
     def _rank_rows_numba(a):
@@ -199,7 +201,8 @@ def _pearson_on_rank_arrays(rx, ry):
     ry_c = ry - np.mean(ry, axis=1, keepdims=True)
     num = np.sum(rx_c * ry_c, axis=1)
     denom = np.sqrt(np.sum(rx_c ** 2, axis=1) * np.sum(ry_c ** 2, axis=1))
-    return np.where(denom < 1e-15, 0.0, num / denom)
+    r = np.where(denom < 1e-15, 0.0, num / denom)
+    return np.clip(r, -1.0, 1.0)
 
 
 def spearman_rho_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:

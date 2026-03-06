@@ -32,10 +32,11 @@ Typical runtimes (per scenario):
     cached for all subsequent rho values within that scenario.
 
 n_reps and second-decimal reliability:
-  Inter-rep SD of CI endpoints ≈ 0.10–0.11 (N=73). SE of mean = SD/√n_reps.
-  n_reps=200 → SE ≈ 0.007 (borderline for 2-decimal precision).
-  SE < 0.005 needs n_reps ≈ 400+; SE < 0.0025 (strong confidence) needs ≈ 1600+.
-  See README "Bootstrap CI" for details.
+  Inter-rep SD of CI endpoints ≈ 0.13 (conservative worst case with ties, N=73).
+  Analytical: SD(endpoint) = (1 - endpoint^2) * sqrt(1.06/(n-3)) * FHP_factor.
+  SE of mean = SD/√n_reps. n_reps=200 → SE ≈ 0.009 (borderline for 2-decimal
+  precision). SE < 0.005 needs n_reps ≈ 650+; SE < 0.0025 (strong confidence)
+  needs ≈ 2600+. See README "Bootstrap CI" for details.
 """
 
 import warnings

@@ -88,7 +88,7 @@ Statistical power and confidence-interval framework for Spearman rank correlatio
 
 ## Bootstrap CI Precision
 
-Inter-rep SD ≈ 0.10–0.11 (N=73). SE of mean = SD/√n_reps. **n_reps guidance**: ≈400 (borderline), ≈1600 (strong), ≈7400 (rounding guarantee). **n_boot**: With n_reps ≥ 1600, n_boot=200–400 suffices; n_boot=500 is comfortable. Runtime scales linearly with n_reps × n_boot. See README for details.
+Inter-rep SD ≈ 0.13 (conservative worst case with ties, N=73; analytical: SD(endpoint) = (1 − endpoint²) × √(1.06/(n−3)) × FHP_factor). SE of mean = SD/√n_reps. **n_reps guidance**: ≈650 (borderline), ≈2600 (strong), ≈10200 (rounding guarantee). **n_boot**: With n_reps ≥ 2600, n_boot=200–400 suffices; n_boot=500 is comfortable. Runtime scales linearly with n_reps × n_boot. See README for details.
 
 ---
 

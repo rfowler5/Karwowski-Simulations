@@ -71,6 +71,42 @@ def test_pvalues_mc_basic():
     assert np.array_equal(reject, pvals < alpha)
 
 
+def test_pvalues_mc_chunked():
+    """MC chunked path (n_sims > threshold) should produce same-shape, valid results."""
+    from permutation_pvalue import pvalues_mc
+    from config import CASES
+    from data_generator import (generate_cumulative_aluminum_batch,
+                                 generate_y_nonparametric_batch,
+                                 calibrate_rho, _fit_lognormal)
+    import numpy as np
+
+    case = CASES[3]
+    n, k, dt = case["n"], 4, "even"
+    y_params = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
+    rng = np.random.default_rng(42)
+    n_sims = 80
+    alpha = 0.05
+
+    x_all = generate_cumulative_aluminum_batch(n_sims, n, k, dt, rng=rng)
+    cal_rho = calibrate_rho(n, k, dt, 0.35, y_params, calibration_mode="single")
+    ln_params = _fit_lognormal(y_params["median"], y_params["iqr"])
+    y_all = generate_y_nonparametric_batch(x_all, 0.35, y_params, rng=rng,
+                                            _calibrated_rho=cal_rho,
+                                            _ln_params=ln_params)
+
+    # Force chunking: set threshold=30 so 80 sims triggers the chunked path,
+    # and chunk_size=25 so we get multiple chunks.
+    reject, pvals, rhos_obs = pvalues_mc(
+        x_all, y_all, n_perm=200, alpha=alpha, rng=rng,
+        n_sims_batch_threshold=30, n_sims_chunk_size=25)
+
+    assert pvals.shape == (n_sims,)
+    assert np.all(pvals > 0)
+    assert np.all(pvals <= 1)
+    assert rhos_obs.shape == (n_sims,)
+    assert np.array_equal(reject, pvals < alpha)
+
+
 def test_estimate_power_smoke():
     """estimate_power should run without error and return power in [0, 1]."""
     from power_simulation import estimate_power
@@ -190,6 +226,7 @@ if __name__ == "__main__":
     test_precomputed_null_shape_and_stats()
     test_precomputed_pvalue_rho_zero()
     test_pvalues_mc_basic()
+    test_pvalues_mc_chunked()
     test_estimate_power_smoke()
     test_precomputed_null_cache_hit()
     test_mc_on_cache_miss_cold()

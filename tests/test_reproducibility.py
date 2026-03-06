@@ -11,6 +11,9 @@ from power_simulation import estimate_power
 from confidence_interval_calculator import bootstrap_ci_averaged
 
 SEED = 42
+# With fastmath=True in spearman_helpers Numba JIT, FP reassociation can cause
+# tiny run-to-run jitter; use a tolerance instead of exact equality.
+REPRODUCIBILITY_TOL = 1e-9
 
 
 def main():
@@ -40,7 +43,10 @@ def main():
                                 calibration_mode="single")
     ci1_lo, ci1_hi = r1["ci_lower"], r1["ci_upper"]
     ci2_lo, ci2_hi = r2["ci_lower"], r2["ci_upper"]
-    if ci1_lo != ci2_lo or ci1_hi != ci2_hi:
+    # Use tolerance: with fastmath=True + parallel, bit-exact reproducibility
+    # is not guaranteed. For bit-exact, set fastmath=False in all @njit in
+    # spearman_helpers.py and clear Numba cache, then use: if ci1_lo != ci2_lo or ci1_hi != ci2_hi
+    if abs(ci1_lo - ci2_lo) > REPRODUCIBILITY_TOL or abs(ci1_hi - ci2_hi) > REPRODUCIBILITY_TOL:
         print(f"FAIL: bootstrap_ci_averaged not reproducible: "
               f"[{ci1_lo}, {ci1_hi}] != [{ci2_lo}, {ci2_hi}]")
         ok = False
