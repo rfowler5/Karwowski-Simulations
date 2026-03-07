@@ -265,6 +265,16 @@ N_PERM_DEFAULT = 1000
 N_PERM_LOW_SIMS = 2000
 N_SIMS_THRESHOLD_FOR_N_PERM = 5000
 
+# Number of permutations used to build each precomputed null distribution.
+# The critical-value sampling variance is SD(c) ≈ 0.218/sqrt(n_pre), which
+# propagates 1:1 to the bisection output (min detectable rho):
+#   n_pre=50,000  → SD ≈ 0.00094 → 95% CI contribution ±0.0018  (adequate for ±0.01)
+#   n_pre=200,000 → SD ≈ 0.00047 → 95% CI contribution ±0.0009  (adequate for ±0.001, just)
+#   n_pre=500,000 → SD ≈ 0.00030 → 95% CI contribution ±0.0006  (adequate for ±0.001, comfortable)
+# Build time: ~0.3s/key at 50k, ~1.2s/key at 200k, ~3s/key at 500k.
+# Memory: ~0.4 MB/key at 50k, ~1.6 MB/key at 200k, ~4 MB/key at 500k.
+# For the ±0.001 precision target, use 500_000 (comfortable) or 200_000 (just sufficient).
+# See AUDIT.md "Known Precision Limitations" for the full analysis.
 PVALUE_PRECOMPUTED_N_PRE = 50_000
 
 PVALUE_N_SIMS_BATCH_THRESHOLD = 5_000
@@ -275,3 +285,16 @@ PVALUE_N_SIMS_CHUNK_SIZE = 2_000
 # When False (original behaviour), the null is always built and cached on first access.
 # Has no effect if the null is already in cache (cached null is always used when available).
 PVALUE_MC_ON_CACHE_MISS = False
+
+# When True (default), the empirical generator uses the same precomputed null
+# (keyed on x tie structure, built from all-distinct y-ranks 1..n) as
+# non-empirical generators.  Expected ~60x faster than per-dataset MC
+# (pending benchmark verification; at minimum >>10x).
+# The approximation error from ignoring y-ties is < 10^-5 on p-values
+# (see README "Precomputed null approximation for empirical generator").
+# Set to False to revert to per-dataset MC permutation (exact but slow).
+#
+# Note: when True with PVALUE_MC_ON_CACHE_MISS=True, a cold cache will
+# still fall through to the MC path until the null is built and cached.
+# This is correct behavior — the speedup applies once the cache is warm.
+EMPIRICAL_USE_PRECOMPUTED_NULL = True

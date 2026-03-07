@@ -2,10 +2,14 @@
 Permutation-based p-values for Spearman correlation.
 
 Provides two paths:
-1. Precomputed null — for non-empirical generators where y is continuous.
+1. Precomputed null — for all generators (including empirical by default).
    A fixed null distribution of Spearman rhos is built once per (n, tie structure)
    and cached. P-values are computed via binary search against sorted |null_rho|.
-2. Monte Carlo — for empirical generators (y may have ties that vary per dataset).
+   For empirical generator, this introduces a negligible approximation from
+   ignoring y-ties (bias < 10^-5 on p-values; see README).
+2. Monte Carlo — optional fallback for empirical generator when
+   config.EMPIRICAL_USE_PRECOMPUTED_NULL is False, or for any generator
+   when PVALUE_MC_ON_CACHE_MISS is True and the null is not cached.
    Uses batched Numba parallelism over all (sim, perm) pairs.
 """
 

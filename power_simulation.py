@@ -35,7 +35,7 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     VECTORIZE_DATA_GENERATION,
                     USE_PERMUTATION_PVALUE, N_PERM_DEFAULT, N_PERM_LOW_SIMS,
                     N_SIMS_THRESHOLD_FOR_N_PERM, PVALUE_PRECOMPUTED_N_PRE,
-                    PVALUE_MC_ON_CACHE_MISS)
+                    PVALUE_MC_ON_CACHE_MISS, EMPIRICAL_USE_PRECOMPUTED_NULL)
 from power_asymptotic import get_x_counts
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
@@ -167,7 +167,10 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     # cache key (n, all_distinct, tuple(x_counts)) correctly captures this:
     # generator is intentionally excluded, and the cached null is shared
     # across all non-empirical generators for the same scenario.
-    if generator != "empirical":
+    # Empirical also uses the precomputed null by default (EMPIRICAL_USE_PRECOMPUTED_NULL=True).
+    # Approximation error from ignoring y-ties is < 10^-5 on p-values; see README.
+    use_precomputed = (generator != "empirical") or EMPIRICAL_USE_PRECOMPUTED_NULL
+    if use_precomputed:
         x_counts = get_x_counts(n, n_distinct, distribution_type=distribution_type,
                                 all_distinct=all_distinct, freq_dict=freq_dict)
         if PVALUE_MC_ON_CACHE_MISS:
@@ -185,7 +188,7 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
             n_perm = _get_n_perm(n_sims)
             reject, pvals, rhos_obs = pvalues_mc(x_all, y_all, n_perm, alpha, rng)
     else:
-        # Empirical: per-dataset Monte Carlo
+        # Empirical with MC: per-dataset Monte Carlo (exact but much slower)
         n_perm = _get_n_perm(n_sims)
         reject, pvals, rhos_obs = pvalues_mc(x_all, y_all, n_perm, alpha, rng)
 

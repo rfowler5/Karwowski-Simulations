@@ -242,6 +242,14 @@ power. Safe for all precision targets (±0.01, ±0.002, ±0.001). See
 **Fallback:** Set `config.EMPIRICAL_USE_PRECOMPUTED_NULL = False` to
 revert to per-dataset MC permutation p-values (exact but much slower;
 expected ~60×, pending benchmark verification).
+**Verification note:** `benchmarks/verify_precomputed_null_empirical.py`
+confirms the empirical generator behaves identically to non-empirical
+generators using the same null (all deltas < ±0.01). It does NOT isolate
+the 10⁻⁵ y-tie approximation error, which is ~100× smaller than the
+dominant noise source (precomputed null realization variance, ~SD 0.001
+at n_pre=50k). The analytic derivation in README is the proper validation
+of the 10⁻⁵ claim. Mixed-sign deltas across cases (case 3 type_I_error
+negative) confirm there is no systematic directional bias from OPT-1.
 
 ### OPT-2 — Vectorize `get_precomputed_null` construction [IMPLEMENTED]
 **Validated:** Vectorized build in `get_precomputed_null`: all `n_pre`
@@ -252,6 +260,83 @@ tests pass). Cold build ~0.3s per key (~32s for 88 keys); ~16–25× speedup vs
 loop. Peak memory ~100 MB (n_pre×n arrays).
 **Files changed:** `permutation_pvalue.py` (`get_precomputed_null`).
 **Verification:** `benchmarks/verify_vectorized_null.py`.
+
+---
+
+## Known Precision Limitations
+
+### PREC-1 — Precomputed null realization variance limits ±0.001 target
+
+**Affects:** All generators using `get_precomputed_null` (nonparametric,
+copula, linear, and empirical with `EMPIRICAL_USE_PRECOMPUTED_NULL=True`).
+
+**Mechanism:** The precomputed null is one random draw of `n_pre`
+permutations (seeded at build time). The 95th-percentile critical value
+`c = quantile(|rho_null|, 0.95)` has sampling variance:
+
+```
+SD(c) = sqrt(0.05 × 0.95) / (f(c) × sqrt(n_pre))
+      ≈ 0.218 / (1.04 × sqrt(n_pre))
+```
+
+This critical value shift propagates 1:1 to the bisection output `rho*`
+(the power-slope and critical-value-slope cancel). So the realization
+variance contributes directly to the precision of min-detectable-rho:
+
+| n_pre | SD(c) | 95% CI contribution to rho* | Adequate for |
+|-------|-------|-----------------------------|-------------|
+| 50,000 (current) | ~0.00094 | ±0.0018 | ±0.01 (comfortable), ±0.002 (marginal) |
+| 200,000 | ~0.00047 | ±0.0009 | ±0.001 (just sufficient) |
+| 500,000 | ~0.00030 | ±0.0006 | ±0.001 (comfortable) |
+
+**Why this does NOT average out with n_sims — and why the MC path's noise does.**
+
+The critical value `c` is determined once when the null is built, then held
+fixed for all n_sims in the session. Every sim's rejection decision is shifted
+by the same amount in the same direction. Increasing n_sims reduces sampling
+variance of the rejection rate *given* a fixed `c`, but cannot reduce the
+offset caused by `c` being slightly wrong. It is a session-persistent bias.
+
+The **MC p-value path** (`EMPIRICAL_USE_PRECOMPUTED_NULL = False`, or
+`PVALUE_MC_ON_CACHE_MISS = True` on a cold cache) behaves differently: each
+sim builds its own mini-null from `n_perm` fresh, independent permutations.
+Each sim's critical value is an independent draw — the errors are IID with
+zero mean across sims. Their contribution to the mean rejection rate averages
+out as 1/√n_sims. With n_perm=1000, the per-sim critical value noise is
+~0.218/√1000 ≈ 0.0069, which averages to ~0.0069/√n_sims on the rejection
+rate. At n_sims=10,000 this is ~7×10⁻⁵ — well below ±0.001.
+
+In summary:
+
+| P-value path | Per-sim critical value noise | Correlated across sims? | Averages out with n_sims? |
+|---|---|---|---|
+| Precomputed null | Shared; fixed at build time | Yes (100%) | No — increase n_pre instead |
+| MC per-dataset | IID; fresh permutations each sim | No | Yes — scales as 1/√n_sims |
+
+**Practical implication for ±0.001:** Both paths can reach ±0.001 — either
+increase n_pre to 500,000 (precomputed null; fast p-values, one-time build
+cost), or use the MC path with n_sims ≈ 10,000–15,000 (no n_pre concern,
+but ~60× slower per sim). Neither path has a systematic directional bias;
+both have zero-mean noise with different reduction mechanisms.
+
+**Empirical confirmation** (from `verify_precomputed_null_empirical.py`,
+seed=42, n_pre=50k): type I error deltas across 4 cases ranged from
+-0.0003 to +0.0013 (SD ≈ 0.0007), consistent with predicted SD ~0.001.
+Mixed signs confirm this is realization variance, not systematic bias.
+
+**Current setting:** `PVALUE_PRECOMPUTED_N_PRE = 50_000` in `config.py`.
+Adequate for ±0.01 and marginally for ±0.002. **Insufficient for ±0.001.**
+
+**Fix for ±0.001 target:** Set `PVALUE_PRECOMPUTED_N_PRE` to 200,000 or 500,000:
+- **200,000** (just sufficient): ~1.2s/key; ~106s full warm (~1.8 min); ~141 MB peak
+- **500,000** (comfortable): ~3s/key; ~264s full warm (~4.4 min); ~352 MB peak
+- p-value lookup: O(log n_pre) — negligible slowdown in both cases
+
+**Relationship to OPT-1:** This limitation is pre-existing and applies to
+all generators, not specific to the empirical generator or OPT-1.
+
+**Future work:** See `.cursor/plans/auto_select_n_pre_precision_tier.plan.md`
+for the idea of auto-selecting n_pre based on the precision tier being run.
 
 ---
 

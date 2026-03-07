@@ -149,7 +149,7 @@ For p-value and calibration decisions (new y per sim, single reference pool, per
 - **Pool and y per sim/rep:** The empirical generator uses a **pool** of y-values (e.g. 71 digitized + 2 or 10 “fill” for n=73 or 81; or 71 fixed + remainder resampled per sim if the “fixed 71” design is applied). Each n_sim or n_rep produces a **new** y dataset: either by resampling **n** values from the pool with replacement (current), or by using exactly the 71 digitized values plus a new random draw for the remainder (fixed-71 design). We do **not** reuse the same y across sims; we intentionally generate new y-data each sim/rep.
 - **Why new y each time is correct:** We are averaging over many (x, y) realizations. The pool (or the 71) is fixed; the **draws** from it (or the remainder) are random. So power and CI estimates average over the randomness in y, giving unbiased expectations and valid assessment of variability. This is the same principle as other generators (nonparametric, copula, linear), where y is newly generated every sim; here the “population” is the finite pool (or 71 + random remainder) instead of a parametric distribution.
 - **Calibration:** Calibration for empirical runs **once per scenario** (cached by n, n_distinct, distribution_type, etc.). It uses a **single reference pool** from `get_pool(n)` (fixed seed), not the per-sim pool. So the same `cal_rho` is used for all n_sims/n_reps in that scenario. Any small mismatch between that reference pool’s tie structure and a given sim’s pool (e.g. different 2 or 10 fill values) is **averaged over** by the randomness of the different y-data across sims: over many n_sims we average over (a) different x, (b) different y-pools/realizations, and (c) rank-mix assignment. The Monte Carlo mean remains close to the target; per-rep variation contributes to the variance we are estimating. So one reference pool and one `cal_rho` per scenario is a reasonable and consistent setup.
-- **P-value by Monte Carlo (permutation):** For the **empirical** generator, y can have **ties** (finite pool → repeated values). The null distribution of Spearman ρ under permutation depends on **both** the x and y tie structures. Because the y tie pattern **varies per dataset** (each sim has a different y from the pool), there is no single precomputed null per scenario. So for empirical we **always use per-dataset Monte Carlo permutation** (no precomputed null cache). This is the only option for empirical; for other generators we can use a precomputed null keyed by (n, x tie structure) when y has no ties.
+- **P-value:** By default (`EMPIRICAL_USE_PRECOMPUTED_NULL = True`), the empirical generator uses the **same precomputed null** as other generators (keyed on x tie structure, built from all-distinct y-ranks 1..n). Although empirical y can have **ties** from the finite pool, the approximation error is negligible (< 1.4 × 10⁻⁵ on p-values; see [Precomputed null approximation](#precomputed-null-approximation-for-empirical-generator)). Set `EMPIRICAL_USE_PRECOMPUTED_NULL = False` to revert to **per-dataset Monte Carlo permutation** (exact, much slower). The MC path uses adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba.
 
 **Why this is legitimate:**
 
@@ -172,11 +172,11 @@ Closed-form expressions (no simulation). Power uses the non-central t-distributi
 Power simulation uses **permutation-based p-values** instead of the t-approximation, because the t-approximation is unreliable with heavy ties. Two paths:
 
 - **Non-empirical generators** (nonparametric, copula, linear): A **precomputed null** distribution of Spearman rhos is built once per (n, tie structure) and cached. P-values are computed by binary search against sorted $`|\rho_{\mathrm{null}}|`$. On first use for a scenario (~1s for $`n \approx 80`$, 50k null samples), the null is built and cached; subsequent calls reuse it — including across different generators for the same scenario. This is exact (not an approximation): all non-empirical generators produce continuous y with no ties, so the permutation null depends only on n and the x tie structure, not the generator. Optional: call `permutation_pvalue.warm_precomputed_null_cache()` to pre-build nulls for all scenarios before long runs.
-- **Empirical generator:** Y may have ties that vary per dataset, so a single precomputed null is not applicable. The code uses **per-dataset Monte Carlo** permutation p-values with adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba. When n_sims exceeds a threshold (default 5k), sims are processed in chunks (default 2k) to cap memory (see [Memory (Monte Carlo p-value)](#memory-monte-carlo-p-value-batching) below).
+- **Empirical generator** (default: precomputed null): By default, the empirical generator uses the **same precomputed null** as other generators (`config.EMPIRICAL_USE_PRECOMPUTED_NULL = True`). The approximation error from ignoring y-ties is < 1.4 × 10⁻⁵ on p-values — negligible for all precision targets (see [Precomputed null approximation for empirical generator](#precomputed-null-approximation-for-empirical-generator) below). Set `config.EMPIRICAL_USE_PRECOMPUTED_NULL = False` to revert to per-dataset Monte Carlo permutation p-values (exact but much slower).
 
 Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for power (e.g. for comparison or tests). For the full equations (precomputed null construction, binary-search p-value, per-dataset MC, fallback t-approximation) and the **MC-on-cache-miss** option, see [Statistical methods](#statistical-methods) below.
 
-**MC-on-cache-miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the precomputed null on a cache miss. It looks up the cache only; if the null is present it is used, otherwise the same per-dataset Monte Carlo permutation path as the empirical generator is used (no build, no cache write). Default is `False` (always build and cache on first use). Use this to avoid precomputed-null build and memory for custom frequencies or one-off scenarios.
+**MC-on-cache-miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the precomputed null on a cache miss. It looks up the cache only; if the null is present it is used, otherwise the per-dataset Monte Carlo permutation path is used (no build, no cache write). Default is `False` (always build and cache on first use). Use this to avoid precomputed-null build and memory for custom frequencies or one-off scenarios.
 
 ## Statistical methods
 
@@ -190,9 +190,9 @@ Set `config.USE_PERMUTATION_PVALUE = False` to revert to the t-based p-value for
 **Default: permutation-based p-values** (`config.USE_PERMUTATION_PVALUE = True`). Two paths:
 
 - **Precomputed null** (non-empirical generators: nonparametric, copula, linear): Build once per (n, tie structure): generate `n_pre` (default 50,000) random permutations of y-ranks (1…n) while keeping x-midranks fixed; compute Spearman $`\rho`$ for each → sort $`|\rho_{\mathrm{null}}|`$. P-value for observed $`|\rho_{\mathrm{obs}}|`$: $`p = (1 + N) / (1 + n_{\mathrm{pre}})`$, where *N* is the number of null $`\rho`$ with $`|\rho_{\mathrm{null}}| \geq |\rho_{\mathrm{obs}}|`$, using binary search against the sorted array. Cached and reused across all sims in a scenario. See `permutation_pvalue.get_precomputed_null` and `pvalues_from_precomputed_null`.
-  - **Why the null is shared across generators (exact, not an approximation):** All three non-empirical generators produce continuous y, so y has no ties and its ranks are a uniform random permutation of {1,…,n} under H₀, regardless of which generator was used. The permutation null distribution of Spearman ρ therefore depends only on n and the x tie structure — not on the generator. The cache key is `(n, all_distinct, tuple(x_counts))`; the generator is intentionally excluded, and the same cached null is correctly reused across nonparametric, copula, and linear for the same scenario. (Contrast with the empirical generator, where y may have ties that vary per dataset, making the null dataset-specific — see below.)
-  - **MC on cache miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the null on a cache miss. It uses a cache lookup only; if the null is in cache it is used, otherwise the same per-dataset MC path as the empirical generator is used (no build, no cache write). Default is `False`.
-- **Per-dataset Monte Carlo** (empirical generator, where y can have ties that vary per dataset): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman $`\rho`$ for each, and $`p = (1 + N) / (1 + n_{\mathrm{perm}})`$, where *N* is the number of permutation $`\rho`$ with $`|\rho_{\mathrm{perm}}| \geq |\rho_{\mathrm{obs}}|`$. Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See `permutation_pvalue.pvalues_mc`.
+  - **Why the null is shared across generators (exact, not an approximation):** All three non-empirical generators produce continuous y, so y has no ties and its ranks are a uniform random permutation of {1,…,n} under H₀, regardless of which generator was used. The permutation null distribution of Spearman ρ therefore depends only on n and the x tie structure — not on the generator. The cache key is `(n, all_distinct, tuple(x_counts))`; the generator is intentionally excluded, and the same cached null is correctly reused across nonparametric, copula, and linear for the same scenario. The empirical generator also uses this null by default (`EMPIRICAL_USE_PRECOMPUTED_NULL = True`), with a negligible approximation from y-ties (< 1.4 × 10⁻⁵; see [Precomputed null approximation](#precomputed-null-approximation-for-empirical-generator)).
+  - **MC on cache miss:** When `config.PVALUE_MC_ON_CACHE_MISS = True`, the code does not build the null on a cache miss. It uses a cache lookup only; if the null is in cache it is used, otherwise the per-dataset MC path is used (no build, no cache write). Default is `False`.
+- **Per-dataset Monte Carlo** (empirical generator when `EMPIRICAL_USE_PRECOMPUTED_NULL = False`; also used as fallback when `PVALUE_MC_ON_CACHE_MISS = True` and null is not cached): For each sim, generate `n_perm` permutations of y (adaptive: 1k when n_sims ≥ 5000, else 2k), compute Spearman $`\rho`$ for each, and $`p = (1 + N) / (1 + n_{\mathrm{perm}})`$, where *N* is the number of permutation $`\rho`$ with $`|\rho_{\mathrm{perm}}| \geq |\rho_{\mathrm{obs}}|`$. Batched over all (sim, perm) pairs via Numba; chunked when n_sims is large. See `permutation_pvalue.pvalues_mc`.
 
 Power = proportion of sims with p < α.
 
@@ -672,7 +672,91 @@ where $`\sigma_\alpha = \sqrt{\alpha(1-\alpha)/n_{\mathrm{perm}}}`$ and the cons
 
 Even in the worst case (MC path with `n_perm`=1000, uniform p-values), permutation noise inflates SE by only **~1.2%**. For the precomputed null (`n_pre`=50,000) used by the non-empirical generators, the inflation is **~0.17%**. Under realistic conditions ($`f_p(\alpha) < 1`$), the effect is even smaller. The approximation is therefore safe for all p-value paths.
 
-**Why `n_perm`=1,000 is adequate for all precision tiers (including empirical).** The empirical generator always uses the MC path (no precomputed null, because y-ties vary per dataset). The +1.2% worst-case SE inflation on power propagates through bisection: the SE of min detectable rho is $`\mathrm{SE}(\hat{\pi})/|\text{power}'(\rho^*)|`$ (see [Bisection contribution to SE](#bisection-contribution-to-se) above), so a +1.2% inflation of $`\mathrm{SE}(\hat{\pi})`$ becomes a +1.2% inflation of $`\mathrm{SE}(\rho^*)`$. For the ±0.01 target half-width, that is $`0.01 \times 0.012 = 0.00012`$ — negligible. Even for the ±0.001 tier it is $`0.001 \times 0.012 = 0.0000012`$. The adaptive `n_perm` (1,000 when `n_sims` ≥ 5,000; 2,000 otherwise) requires no adjustment.
+**MC path noise vs precomputed null realization variance — a key distinction.**
+The variance decomposition above (Var(π̂) = [...] / n_sims) applies to the **MC path**: each sim uses fresh, independent permutations, so the per-sim critical value errors are IID and their contribution to the mean rejection rate averages out as 1/√n_sims. The precomputed null behaves differently: one null is built once and shared by all n_sims — its critical value offset is the same for every sim, fully correlated, and does not reduce with n_sims. The fix for the precomputed null is increasing n_pre, not n_sims. See AUDIT.md "Known Precision Limitations" (PREC-1) for the quantitative analysis and the contrast table.
+
+**Why `n_perm`=1,000 is adequate for all precision tiers (including empirical).** The empirical generator uses the precomputed null by default (see [Precomputed null approximation](#precomputed-null-approximation-for-empirical-generator)). When `EMPIRICAL_USE_PRECOMPUTED_NULL = False`, it falls back to the MC path. The +1.2% worst-case SE inflation on power propagates through bisection: the SE of min detectable rho is $`\mathrm{SE}(\hat{\pi})/|\text{power}'(\rho^*)|`$ (see [Bisection contribution to SE](#bisection-contribution-to-se) above), so a +1.2% inflation of $`\mathrm{SE}(\hat{\pi})`$ becomes a +1.2% inflation of $`\mathrm{SE}(\rho^*)`$. For the ±0.01 target half-width, that is $`0.01 \times 0.012 = 0.00012`$ — negligible. Even for the ±0.001 tier it is $`0.001 \times 0.012 = 0.0000012`$. The adaptive `n_perm` (1,000 when `n_sims` ≥ 5,000; 2,000 otherwise) requires no adjustment.
+
+#### Precomputed null approximation for empirical generator
+
+When `config.EMPIRICAL_USE_PRECOMPUTED_NULL = True` (default), the empirical
+generator uses the same precomputed null as other generators. The precomputed
+null permutes all-distinct y-ranks {1..n}; but empirical y-data has ties from
+the finite pool (digitized values repeated via bootstrap resampling). This
+section quantifies the approximation error.
+
+**Source of error.** The precomputed null computes each null rho as:
+
+```math
+\rho_{\mathrm{null}} = \frac{\sum_i (x_i - \bar{x})(\pi(y)_i - \bar{y})}{\sqrt{\sum_i (x_i - \bar{x})^2} \cdot \sqrt{\sum_i (\pi(y)_i - \bar{y})^2}}
+```
+
+where $`\pi(y)`$ are permuted ranks from {1..n} (all distinct). The observed
+rho from `spearman_rho_2d` uses midranks of the actual y-data (with ties),
+which have $`\mathrm{std}(y_{\mathrm{ranks}}) < \mathrm{std}(\{1 \ldots n\})`$.
+The mismatch inflates $`|\rho_{\mathrm{obs}}|`$ relative to the null by the ratio:
+
+```math
+\frac{\sigma_{y,\mathrm{untied}}}{\sigma_{y,\mathrm{tied}}} = \sqrt{\frac{(n^3-n)/12}{(n^3-n)/12 - \Sigma_y/12}} \approx 1 + \frac{\Sigma_y}{2(n^3-n)}
+```
+
+where $`\Sigma_y = \sum_j (t_j^3 - t_j)`$ summed over y tie groups.
+
+**Tie counts in digitized data** (`data/digitized.py`):
+- **H_AL71:** 4 tie pairs — $`\Sigma = 4 \times 6 = 24`$
+- **B_AL71:** 1 triple + 6 pairs — $`\Sigma = 24 + 36 = 60`$
+
+**Pool totals after resampling** (base-71 ties + expected contribution
+from `build_empirical_pool` resampled fill):
+- **n=73** (B-Al, 2 resampled from B_AL71): $`\Sigma_y \approx 79`$
+- **n=80** (B-Al + 7 outliers): $`\Sigma_y \approx 79`$ (outliers are continuous)
+- **n=81** (H-Al, 10 resampled from H_AL71): $`\Sigma_y \approx 98`$
+- **n=82** (H-Al + 1 outlier): $`\Sigma_y \approx 98`$
+
+**Denominator inflation (worst cases):**
+
+| Case | n | $`n^3-n`$ | $`\Sigma_y`$ | Inflation | $`\Delta\rho`$ at crit |
+|------|---|-----------|--------------|-----------|------------------------|
+| n=73 | 73 | 388,944 | ~79 | 1 + 1.0×10⁻⁴ | ~2.3×10⁻⁵ |
+| n=81 | 81 | 531,360 | ~98 | 1 + 9.2×10⁻⁵ | ~2.0×10⁻⁵ |
+
+**Impact on p-values.** The CDF shift from the kurtosis mismatch
+(Edgeworth expansion) plus the denominator inflation gives total
+$`\Delta p < 1.4 \times 10^{-5}`$. Direction: anticonservative
+(p slightly too small).
+
+**Impact on power.** The p-value bias shifts the rejection rate by
+$`\Delta\text{power} \approx 10^{-5}`$. This is a **systematic bias**,
+not random noise — it is **not reduced by increasing n_sims**. However,
+it is negligible for all precision targets:
+
+| Target | Ratio (bias / target) | Verdict |
+|--------|-----------------------|---------|
+| ±0.01  | 10⁻³ (0.1%)          | Safe    |
+| ±0.002 | 5×10⁻³ (0.5%)        | Safe    |
+| ±0.001 | 10⁻² (1%)            | Safe    |
+
+**Variance invariance.** Under permutation, the first two moments of
+Spearman rho are exactly invariant to tie structure:
+$`\mathrm{E}_\pi[\rho] = 0`$ and $`\mathrm{Var}_\pi(\rho) = 1/(n-1)`$,
+regardless of ties in x or y. The error arises only from higher moments
+(kurtosis) and from the denominator normalization mismatch between
+observed and null rho — both of order $`\Sigma_y / n^3`$.
+
+**Fallback.** Set `config.EMPIRICAL_USE_PRECOMPUTED_NULL = False` to use
+per-dataset Monte Carlo permutation p-values (exact, no approximation,
+much slower). The MC path is documented in
+[Per-dataset Monte Carlo](#p-value-methods-for-monte-carlo-power) above.
+
+**Verification.** Run `benchmarks/verify_precomputed_null_empirical.py`
+to empirically confirm the approximation is safe — i.e. deltas between
+precomputed and MC are bounded well below all precision targets for all
+four cases. The script does not isolate the 10⁻⁵ y-tie error; that rests
+on the analytic derivation above. The dominant noise source in the script
+output is precomputed null realization variance (~SD 0.001 at n_pre=50k),
+which is the same for all generators using the same null and is not
+introduced by OPT-1. See AUDIT.md "Known Precision Limitations" for the
+realization-variance analysis and the n_pre recommendation for ±0.001.
 
 #### CI endpoint precision
 
