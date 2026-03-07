@@ -6,7 +6,8 @@ Run one at a time per benchmarking rule. Use --quick for single-scenario only,
 --skip-parallel to skip parallel (n_jobs=-1) runs.
 
 Usage:
-  python benchmarks/benchmark_realistic_runtimes.py [--quick] [--skip-parallel] [--generators all|nonparametric|copula|linear|empirical]
+  python benchmarks/benchmark_realistic_runtimes.py [--quick] [--skip-parallel] [--generators ...] [--debug-cache-warmup]
+  Use --debug-cache-warmup to time null + calibration cache warmup; then grid runs use hot caches (simulation-only cost).
 """
 import sys
 import os
@@ -18,13 +19,14 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from config import CASES
+from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
 from power_simulation import min_detectable_rho, run_all_scenarios
 from confidence_interval_calculator import bootstrap_ci_averaged, run_all_ci_scenarios
-from data_generator import digitized_available
+from data_generator import digitized_available, _calibrate_rho_multipoint
+from permutation_pvalue import warm_precomputed_null_cache
 
 # Benchmark params (small, for measurement)
-N_SIMS_BENCH = 500
+N_SIMS_BENCH = 50
 N_CAL_BENCH = 300
 N_REPS_BENCH = 200
 N_BOOT_BENCH = 500
@@ -33,16 +35,17 @@ CASE_ID = 3
 DIST_TYPE_SINGLE = "heavy_center"
 N_DISTINCT_SINGLE = 4
 
-# Precision tier params (from plan / benchmark_precision_params)
+# Precision tier params
+# (from plan / benchmark_precision_params; rounded to nicer values).
 POWER_TIERS = [
-    (2000, 1000),      # +/-0.01
-    (50000, 21000),    # +/-0.002
-    (200000, 83000),   # +/-0.001
+    (2220, 1000),      # +/-0.01   (C_BISECTION = 0.17, C_CAL= 0.112)
+    (55520, 24100),    # +/-0.002  (C_BISECTION = 0.17, C_CAL= 0.112)
+    (222050, 96400),   # +/-0.001  (C_BISECTION = 0.17, C_CAL= 0.112)
 ]
 CI_TIERS = [
-    (649, 500),        # +/-0.01   (SD_INTER_REP=0.13)
-    (16231, 500),      # +/-0.002  (SD_INTER_REP=0.13)
-    (64923, 500),      # +/-0.001  (SD_INTER_REP=0.13)
+    (650, 500),        # +/-0.01   (SD_INTER_REP=0.13)
+    (16240, 500),      # +/-0.002  (SD_INTER_REP=0.13)
+    (64930, 500),      # +/-0.001  (SD_INTER_REP=0.13)
 ]
 EFFICIENCY = 0.5
 
@@ -53,6 +56,8 @@ def _parse_args():
                    help="Comma-separated: all, nonparametric, copula, linear, empirical (default: all)")
     p.add_argument("--quick", action="store_true", help="Single-scenario only (skip full grid)")
     p.add_argument("--skip-parallel", action="store_true", help="Skip n_jobs=-1 benchmarks")
+    p.add_argument("--debug-cache-warmup", action="store_true",
+                   help="Time null and calibration cache warmup; then grid runs see hot caches (for debugging)")
     return p.parse_args()
 
 
@@ -123,6 +128,33 @@ def run():
             generator=gen, n_reps=5, n_boot=10, seed=0,
             batch_bootstrap=True, calibration_mode="multipoint")
     print("Warmup done.\n")
+
+    # Optional: time null + calibration cache warmup (same 88 scenarios as full grid)
+    if args.debug_cache_warmup:
+        print("=== Debug: cache warmup (null + calibration) ===")
+        t0 = time.perf_counter()
+        warm_precomputed_null_cache(n_pre=50000, seed=SEED)
+        t_null = time.perf_counter() - t0
+        print(f"  Null cache (88 builds):     {t_null:.2f}s")
+        # Warm calibration cache for all scenario (n, k, dt, all_distinct) combos
+        cal_seed = 99
+        n_cal = N_CAL_BENCH
+        t0 = time.perf_counter()
+        for case_id, case in CASES.items():
+            n = case["n"]
+            y_params = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
+            for k in N_DISTINCT_VALUES:
+                for dt in DISTRIBUTION_TYPES:
+                    _calibrate_rho_multipoint(
+                        n, k, dt, 0.3, y_params, all_distinct=False,
+                        n_cal=n_cal, seed=cal_seed)
+            _calibrate_rho_multipoint(
+                n, n, None, 0.3, y_params, all_distinct=True,
+                n_cal=n_cal, seed=cal_seed)
+        t_cal = time.perf_counter() - t0
+        print(f"  Calibration cache (88):     {t_cal:.2f}s")
+        print(f"  Total cache warmup:         {t_null + t_cal:.2f}s")
+        print("  (Next grid runs use hot null + calibration caches.)\n")
 
     # --- Power: single (seq), grid seq, grid par ---
     power_single = {}

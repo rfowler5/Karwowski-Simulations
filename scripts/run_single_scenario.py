@@ -4,12 +4,13 @@ Run power and/or CI analysis for a single scenario.
 Allows quick testing of a specific (case, k, distribution) combination
 without running the full simulation grid.
 
-Typical runtimes (nonparametric, power only):
-  - n_sims=50:   ~5s (includes one-time calibration ~3s)
-  - n_sims=500:  ~8s
-  - n_sims=10000: ~60s
+Typical runtimes (nonparametric, power only, Numba JIT + precomputed null active):
+  - n_sims=50:   ~0.3s
+  - n_sims=500:  ~0.5s
+  - n_sims=10000: ~4s
   Adding CIs (n_reps=20, n_boot=500): +5-10s
   Adding CIs (n_reps=200, n_boot=10000): +3-5 min
+  Pre-OPT-2 (no precomputed null): ~5s at n_sims=50, ~8s at n_sims=500, ~60s at n_sims=10000
 
 Programmatic usage
 ------------------

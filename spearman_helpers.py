@@ -153,10 +153,46 @@ if _NUMBA_AVAILABLE:
             ry = _tied_rank(yb)
             result[rep, b] = _pearson_on_ranks_1d(rx, ry)
         return result
+
+    @njit(fastmath=True, cache=True, parallel=True)
+    def _batch_permutation_rhos_preranked_jit(rx_all, y_all, perm_idx_all):
+        """Batch permutation Spearman rho with precomputed x-ranks.
+
+        Identical to _batch_permutation_rhos_jit but x is already ranked,
+        avoiding redundant _tied_rank(x) for every (sim, perm) pair.
+        Since x does not change across permutations, rx for each sim is
+        constant — precomputing it outside the loop halves ranking work.
+
+        Parameters
+        ----------
+        rx_all : (n_sims, n) float64
+            Precomputed average ranks of x rows.
+        y_all : (n_sims, n) float64
+        perm_idx_all : (n_perm, n_sims, n) int32
+
+        Returns
+        -------
+        result : (n_sims, n_perm) float64
+        """
+        n_perm, n_sims, n = perm_idx_all.shape
+        result = np.empty((n_sims, n_perm), dtype=np.float64)
+        total = n_sims * n_perm
+        for flat in prange(total):
+            rep = flat // n_perm
+            b = flat % n_perm
+            yb = np.empty(n, dtype=np.float64)
+            for i in range(n):
+                idx = perm_idx_all[b, rep, i]
+                yb[i] = y_all[rep, idx]
+            ry = _tied_rank(yb)
+            result[rep, b] = _pearson_on_ranks_1d(rx_all[rep], ry)
+        return result
+
 else:
     _bootstrap_rhos_jit = None
     _batch_bootstrap_rhos_jit = None
     _batch_permutation_rhos_jit = None
+    _batch_permutation_rhos_preranked_jit = None
 
 # ---------------------------------------------------------------------------
 # Public ranking and correlation functions

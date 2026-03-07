@@ -16,11 +16,12 @@ Power estimate SE ~ sqrt(p(1-p) / n_sims).  At p = 0.80:
   - 10 000 sims -> SE ~ 0.004,  95 % margin ~ +/-0.008
   - 50 000 sims -> SE ~ 0.0018, 95 % margin ~ +/-0.004
 
-Typical runtimes (nonparametric generator):
-  - Single scenario: ~5s (500 sims), ~45s (10000 sims); includes calibration
-  - Full grid (88 scenarios, 500 sims): ~6 min sequential, ~3 min with n_jobs=4
+Typical runtimes (nonparametric generator, Numba JIT + precomputed null active):
+  - Single scenario: ~0.5s (500 sims), ~4s (10000 sims)
+  - Full grid (88 scenarios, 500 sims): ~40s sequential (warm caches), ~20s with n_jobs=4
   - Calibration is cached per (n, k, dist_type) and reused across rho values
   - Copula now uses calibration; linear has no calibration overhead
+  - Pre-OPT-2 (no precomputed null): ~5s/500 sims, ~45s/10000 sims, ~6 min full grid
 """
 
 import warnings
@@ -159,6 +160,13 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         return np.sum(pvals < alpha) / n_sims
 
     # Permutation-based p-values
+    # Non-empirical generators (nonparametric, copula, linear) all produce
+    # continuous y with no ties.  Under H0, the y-ranks are a uniform
+    # permutation of {1,...,n} regardless of generator, so the permutation
+    # null of Spearman rho depends only on n and the x tie structure.  The
+    # cache key (n, all_distinct, tuple(x_counts)) correctly captures this:
+    # generator is intentionally excluded, and the cached null is shared
+    # across all non-empirical generators for the same scenario.
     if generator != "empirical":
         x_counts = get_x_counts(n, n_distinct, distribution_type=distribution_type,
                                 all_distinct=all_distinct, freq_dict=freq_dict)

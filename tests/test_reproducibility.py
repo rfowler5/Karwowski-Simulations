@@ -1,4 +1,10 @@
-"""Verify same seed produces identical results for estimate_power and bootstrap_ci_averaged."""
+"""Verify same seed produces identical results for estimate_power and bootstrap_ci_averaged.
+
+If this test fails, especially after making code changes to spearman_helpers or
+other Numba-JIT'd modules, try clearing the Numba cache first: remove
+__pycache__/*.nbc and __pycache__/*.nbi (or at least spearman_helpers.*.nbc/.nbi).
+Stale cached bytecode can cause spurious reproducibility failures.
+"""
 
 import sys
 from pathlib import Path
@@ -30,6 +36,7 @@ def main():
                         calibration_mode="single")
     if p1 != p2:
         print(f"FAIL: estimate_power not reproducible: {p1} != {p2}")
+        print("Tip: If you recently changed code, clear Numba cache (__pycache__/*.nbc, __pycache__/*.nbi) and re-run.")
         ok = False
     else:
         print(f"PASS: estimate_power reproducible (seed={SEED}): power={p1:.4f}")
@@ -49,6 +56,7 @@ def main():
     if abs(ci1_lo - ci2_lo) > REPRODUCIBILITY_TOL or abs(ci1_hi - ci2_hi) > REPRODUCIBILITY_TOL:
         print(f"FAIL: bootstrap_ci_averaged not reproducible: "
               f"[{ci1_lo}, {ci1_hi}] != [{ci2_lo}, {ci2_hi}]")
+        print("Tip: If you recently changed code, clear Numba cache (__pycache__/*.nbc, __pycache__/*.nbi) and re-run.")
         ok = False
     else:
         print(f"PASS: bootstrap_ci_averaged reproducible (seed={SEED}): "

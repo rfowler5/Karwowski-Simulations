@@ -32,6 +32,7 @@ QUICK_TESTS = [
     ("test_freq_dict_sums_to_n.py", []),
     ("test_spearman_2d.py", []),
     ("test_batch_bootstrap_ci.py", []),
+    ("test_calibration_precompute.py", []),  # unit tests for precompute/eval split; run before calibration_accuracy so failures pinpoint the refactored path
     ("test_calibration_accuracy.py", None),  # filled in main() with CALIBRATION_QUICK_ARGV ± --strict
     ("test_asymptotic_formulas.py", []),
     ("test_reproducibility.py", []),

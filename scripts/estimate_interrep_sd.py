@@ -222,31 +222,32 @@ def _run_empirical(args):
           f"max={max(sd_lo_a, sd_hi_a):.4f}")
     print()
 
-    lowers = []
-    uppers = []
+    lower_sds = []
+    upper_sds = []
     for i in range(args.replications):
         seed = args.seed + i * 1000
         result = bootstrap_ci_averaged(
             n=n,
             n_distinct=args.n_distinct,
-            dist_type=args.dist_type,
-            rho=rho,
+            distribution_type=args.dist_type,
+            rho_s=rho,
             y_params=y_params,
             n_reps=args.n_reps,
             n_boot=args.n_boot,
             seed=seed,
             generator=args.generator,
         )
-        lo_ci, hi_ci = result[0], result[1]
-        lowers.append(lo_ci)
-        uppers.append(hi_ci)
+        lo_ci = result["ci_lower"]
+        hi_ci = result["ci_upper"]
+        lower_sds.append(result["ci_lower_sd"])
+        upper_sds.append(result["ci_upper_sd"])
         if (i + 1) % 5 == 0 or i == 0:
             print(f"  Run {i+1}/{args.replications}: CI = [{lo_ci:.4f}, {hi_ci:.4f}]")
 
-    lowers = np.array(lowers)
-    uppers = np.array(uppers)
-    sd_lo_emp = np.std(lowers, ddof=1)
-    sd_hi_emp = np.std(uppers, ddof=1)
+    sd_lo_emp = float(np.mean(lower_sds))
+    sd_hi_emp = float(np.mean(upper_sds))
+    se_lo = np.std(lower_sds, ddof=1) / math.sqrt(args.replications)
+    se_hi = np.std(upper_sds, ddof=1) / math.sqrt(args.replications)
 
     print()
     print("Results")
@@ -257,8 +258,8 @@ def _run_empirical(args):
           f"(analytical: {max(sd_lo_a, sd_hi_a):.4f})")
     print()
     print("  Note: Empirical SD has sampling noise from finite replications.")
-    print(f"  SE of the SD estimate ~ SD/sqrt(2*(replications-1)) "
-          f"~ {max(sd_lo_emp, sd_hi_emp)/math.sqrt(2*(args.replications-1)):.4f}")
+    print(f"  SE of the σ_rep estimate ~ std(per-run SDs)/sqrt(replications) "
+          f"~ {max(se_lo, se_hi):.4f}")
     print()
     print("Next steps: Use max SD (rounded up) in benchmarks/benchmark_precision_params.py")
     print("  (SD_INTER_REP); see docs/PRECISION_WHEN_DATA_CHANGES.md.")

@@ -30,7 +30,7 @@ import numpy as np
 from scipy.stats import norm, rankdata
 
 from config import X_PARAMS, FREQ_DICT
-from spearman_helpers import _rank_rows
+from spearman_helpers import _rank_rows, _pearson_on_rank_arrays
 
 try:
     from data.digitized import H_AL71, B_AL71, H_AL_OUTLIER, B_AL_OUTLIER_MIN, B_AL_OUTLIER_MAX
@@ -259,18 +259,52 @@ def generate_y_empirical(x, rho_s, y_params, rng=None, _calibrated_rho=None):
                          marginal="empirical", pool=pool)
 
 
+def _build_empirical_pool_batch(n, n_reps, rng):
+    """Vectorized pool construction: returns (n_reps, n) array.
+
+    Replaces the Python loop ``[build_empirical_pool(n, rng) for _ in range(n_reps)]``
+    with batched numpy calls, eliminating per-rep Python overhead.
+    The 71 digitized values appear exactly once in every row; only the
+    remainder is resampled.
+    """
+    if not _DIGITIZED_AVAILABLE:
+        raise ImportError(
+            "Digitized data not available. Create data/digitized.py or use --skip-empirical.")
+    if n == 73:
+        fill = rng.choice(B_AL71, size=(n_reps, 2), replace=True)       # (n_reps, 2)
+        base = np.tile(B_AL71, (n_reps, 1))                               # (n_reps, 71)
+        return np.concatenate([base, fill], axis=1)                       # (n_reps, 73)
+    elif n == 80:
+        pool73 = _build_empirical_pool_batch(73, n_reps, rng)             # (n_reps, 73)
+        log_low = np.log(B_AL_OUTLIER_MIN)
+        log_high = np.log(B_AL_OUTLIER_MAX)
+        outlier_fill = np.exp(rng.uniform(log_low, log_high, (n_reps, 5)))  # (n_reps, 5)
+        known_out = np.tile(known_b_al_outliers, (n_reps, 1))             # (n_reps, 2)
+        return np.concatenate([pool73, known_out, outlier_fill], axis=1)  # (n_reps, 80)
+    elif n == 81:
+        fill = rng.choice(H_AL71, size=(n_reps, 10), replace=True)       # (n_reps, 10)
+        base = np.tile(H_AL71, (n_reps, 1))                               # (n_reps, 71)
+        return np.concatenate([base, fill], axis=1)                       # (n_reps, 81)
+    elif n == 82:
+        pool81 = _build_empirical_pool_batch(81, n_reps, rng)             # (n_reps, 81)
+        outlier = np.full((n_reps, 1), H_AL_OUTLIER, dtype=np.float64)   # (n_reps, 1)
+        return np.concatenate([pool81, outlier], axis=1)                  # (n_reps, 82)
+    else:
+        raise ValueError(
+            f"Empirical generator only supports n in {{73, 80, 81, 82}}, got {n}")
+
+
 def generate_y_empirical_batch(x_batch, rho_s, y_params, rng=None,
                                _calibrated_rho=None):
     """Batch version of generate_y_empirical.
 
-    Builds a fresh pool per rep via build_empirical_pool (71 digitized
-    values fixed, remainder resampled).  The pool parameter has been
-    removed; callers no longer pass pool for data generation.
+    Builds a fresh pool per rep via _build_empirical_pool_batch (vectorized):
+    the 71 digitized values appear exactly once, remainder is resampled.
     """
     if rng is None:
         rng = np.random.default_rng()
     n_reps, n = x_batch.shape
-    pool_batch = np.array([build_empirical_pool(n, rng) for _ in range(n_reps)])
+    pool_batch = _build_empirical_pool_batch(n, n_reps, rng)
     rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
     x_ranks_batch = _rank_rows(x_batch)
     return _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
@@ -463,7 +497,10 @@ def _fast_spearman(x_ranks, y):
 
 
 def _mean_rho(rho_in, template, y_params, n_cal, seed):
-    """Mean realised Spearman rho over n_cal samples for given rho_in."""
+    """Scalar reference implementation; not used in production (see _mean_rho_vec).
+
+    Retained for validation and unit testing against the vectorized path.
+    """
     cal_rng = np.random.default_rng(seed)
     mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
     total = 0.0
@@ -493,21 +530,124 @@ def _mean_rho(rho_in, template, y_params, n_cal, seed):
     return total / n_cal
 
 
+def _precompute_calibration_arrays(template, y_params, n_cal, seed):
+    """Precompute the rho-independent arrays for nonparametric calibration.
+
+    Called once per bisection probe; the returned arrays are reused across
+    all ~27 bisection iterations, avoiding redundant RNG work and x-ranking.
+
+    Returns
+    -------
+    s_x : ndarray, shape (n_cal, n)
+        Standardized x ranks.
+    s_n : ndarray, shape (n_cal, n)
+        Standardized noise ranks.
+    y_batch_sorted : ndarray, shape (n_cal, n)
+        Lognormal draws, sorted within each row (ready for rank-assignment).
+    x_ranks_batch : ndarray, shape (n_cal, n)
+        Raw x ranks (needed by _pearson_on_rank_arrays).
+    """
+    cal_rng = np.random.default_rng(seed)
+    n = len(template)
+    mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
+
+    # Batch-shuffle x: (n_cal, n)
+    x_batch = np.tile(template, (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        x_batch = cal_rng.permuted(x_batch, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        x_batch = np.take_along_axis(x_batch, perm, axis=1)
+
+    x_ranks_batch = _rank_rows(x_batch)  # (n_cal, n), Numba-parallel
+
+    # Noise ranks: independent permutation per row
+    noise_base = np.tile(np.arange(1.0, n + 1.0), (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        noise_batch = cal_rng.permuted(noise_base, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        noise_batch = np.take_along_axis(noise_base, perm, axis=1)
+
+    # Standardize x_ranks per row
+    s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
+    sd_x = x_ranks_batch.std(axis=1, keepdims=True, ddof=0)
+    sd_x = np.where(sd_x > 0, sd_x, 1.0)
+    s_x /= sd_x
+
+    # Noise ranks are always permutations of 1..n, so mean/std are constants
+    noise_mean = (n + 1) / 2.0
+    noise_std = np.sqrt((n * n - 1) / 12.0)
+    s_n = (noise_batch - noise_mean) / noise_std
+
+    y_batch_sorted = cal_rng.lognormal(mean=mu, sigma=sigma, size=(n_cal, n))
+    y_batch_sorted.sort(axis=1)
+
+    return s_x, s_n, y_batch_sorted, x_ranks_batch
+
+
+def _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch):
+    """Evaluate mean realised Spearman rho for a given rho_in.
+
+    Takes the precomputed rho-independent arrays from
+    _precompute_calibration_arrays (or _precompute_calibration_arrays_empirical)
+    and performs only the rho-dependent steps: mixed-rank construction,
+    argsort, y-assignment, ranking, and Pearson-on-ranks averaging.
+
+    Used by both nonparametric and empirical calibration bisection loops.
+    """
+    n_cal = s_x.shape[0]
+    rho_c = np.clip(rho_in, -0.999, 0.999)
+    mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n  # (n_cal, n)
+
+    order = np.argsort(mixed, axis=1)
+    rows = np.arange(n_cal)[:, None]
+    y_final = np.empty_like(y_batch_sorted)
+    y_final[rows, order] = y_batch_sorted
+
+    ry = _rank_rows(y_final)  # (n_cal, n)
+    rhos = _pearson_on_rank_arrays(x_ranks_batch, ry)  # (n_cal,)
+    return float(np.mean(rhos))
+
+
+def _mean_rho_vec(rho_in, template, y_params, n_cal, seed):
+    """Vectorized mean realised Spearman rho: replaces the n_cal Python loop
+    with a single batch of matrix operations.
+
+    Produces an equivalent Monte Carlo estimate as _mean_rho but uses
+    _rank_rows (Numba-parallel when available) and BLAS matrix ops,
+    giving a ~10-20x speedup for n_cal=300 at n~80.
+    Random sequence differs from _mean_rho for the same seed (batch vs
+    sequential generation) but the expectation and variance are the same.
+
+    Convenience wrapper around _precompute_calibration_arrays + _eval_mean_rho.
+    """
+    s_x, s_n, y_batch_sorted, x_ranks_batch = _precompute_calibration_arrays(
+        template, y_params, n_cal, seed)
+    return _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch)
+
+
 def _bisect_for_probe(probe, template, y_params, n_cal, seed,
                       n_iter=25, tol=5e-5):
     """Bisect to find rho_in such that _mean_rho(rho_in, ...) ≈ probe.
 
+    Precomputes rho-independent arrays once, then calls _eval_mean_rho for
+    each bisection step (~27×), avoiding redundant RNG and x-ranking work.
     Returns rho_in (float) or None if the probe is unreachable.
     """
+    arrays = _precompute_calibration_arrays(template, y_params, n_cal, seed)
+
     lo, hi = 0.0, min(probe * 2.0, 0.999)
-    if _mean_rho(hi, template, y_params, n_cal, seed) < probe:
+    val_hi = _eval_mean_rho(hi, *arrays)
+    if val_hi < probe:
         hi = 0.999
-    if _mean_rho(hi, template, y_params, n_cal, seed) < probe:
+        val_hi = _eval_mean_rho(hi, *arrays)
+    if val_hi < probe:
         return None  # unreachable
 
     for _ in range(n_iter):
         mid = (lo + hi) / 2.0
-        observed = _mean_rho(mid, template, y_params, n_cal, seed)
+        observed = _eval_mean_rho(mid, *arrays)
         if observed < probe:
             lo = mid
         else:
@@ -515,7 +655,14 @@ def _bisect_for_probe(probe, template, y_params, n_cal, seed,
         if hi - lo < tol:
             break
 
-    return (lo + hi) / 2.0
+    # For highly-tied x distributions, _eval_mean_rho has structural step
+    # discontinuities (f jumps sharply at a rho_in threshold).  The
+    # bisection converges to that jump but lo and hi sit on opposite sides,
+    # so (lo+hi)/2 can land on the wrong plateau and be far from the probe.
+    # Pick whichever endpoint evaluates closer to the target.
+    val_lo = _eval_mean_rho(lo, *arrays)
+    val_hi = _eval_mean_rho(hi, *arrays)
+    return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
 
 
 def _interp_with_extrapolation(x, xp, fp):
@@ -759,7 +906,10 @@ _CALIBRATION_CACHE_MULTIPOINT_EMP = {}
 
 
 def _mean_rho_empirical(rho_in, template, pool, n_cal, seed):
-    """Mean realised Spearman rho over n_cal samples using empirical pool."""
+    """Scalar reference implementation; not used in production (see _mean_rho_empirical_vec).
+
+    Retained for validation and unit testing against the vectorized path.
+    """
     cal_rng = np.random.default_rng(seed)
     total = 0.0
     for _ in range(n_cal):
@@ -787,18 +937,95 @@ def _mean_rho_empirical(rho_in, template, pool, n_cal, seed):
     return total / n_cal
 
 
+def _precompute_calibration_arrays_empirical(template, pool, n_cal, seed):
+    """Precompute the rho-independent arrays for empirical calibration.
+
+    Identical structure to _precompute_calibration_arrays but uses the
+    deterministic empirical pool instead of lognormal draws: y_batch_sorted
+    is simply the sorted pool tiled n_cal times.
+
+    Returns
+    -------
+    s_x : ndarray, shape (n_cal, n)
+    s_n : ndarray, shape (n_cal, n)
+    y_batch_sorted : ndarray, shape (n_cal, n)
+        Sorted pool tiled n_cal times.
+    x_ranks_batch : ndarray, shape (n_cal, n)
+    """
+    cal_rng = np.random.default_rng(seed)
+    n = len(template)
+
+    # Batch-shuffle x: (n_cal, n)
+    x_batch = np.tile(template, (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        x_batch = cal_rng.permuted(x_batch, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        x_batch = np.take_along_axis(x_batch, perm, axis=1)
+
+    x_ranks_batch = _rank_rows(x_batch)  # (n_cal, n)
+
+    # Noise ranks: independent permutation per row
+    noise_base = np.tile(np.arange(1.0, n + 1.0), (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        noise_batch = cal_rng.permuted(noise_base, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        noise_batch = np.take_along_axis(noise_base, perm, axis=1)
+
+    # Standardize x_ranks per row
+    s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
+    sd_x = x_ranks_batch.std(axis=1, keepdims=True, ddof=0)
+    sd_x = np.where(sd_x > 0, sd_x, 1.0)
+    s_x /= sd_x
+
+    # Noise ranks are always permutations of 1..n
+    noise_mean = (n + 1) / 2.0
+    noise_std = np.sqrt((n * n - 1) / 12.0)
+    s_n = (noise_batch - noise_mean) / noise_std
+
+    # Pool is deterministic; no RNG needed for y
+    y_batch_sorted = np.tile(np.sort(pool), (n_cal, 1))  # (n_cal, n)
+
+    return s_x, s_n, y_batch_sorted, x_ranks_batch
+
+
+def _mean_rho_empirical_vec(rho_in, template, pool, n_cal, seed):
+    """Vectorized mean realised Spearman rho using empirical pool.
+
+    Replaces the n_cal Python loop in _mean_rho_empirical with batch ops.
+    The pool is fixed (calibration uses get_pool which has a fixed seed),
+    so y_batch is simply the sorted pool tiled n_cal times, permuted by
+    the mixed-rank ordering.  ~10-20x faster than the scalar version.
+
+    Convenience wrapper around _precompute_calibration_arrays_empirical +
+    _eval_mean_rho.
+    """
+    s_x, s_n, y_batch_sorted, x_ranks_batch = \
+        _precompute_calibration_arrays_empirical(template, pool, n_cal, seed)
+    return _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch)
+
+
 def _bisect_for_probe_empirical(probe, template, pool, n_cal, seed,
                                 n_iter=25, tol=5e-5):
-    """Bisect to find rho_in such that _mean_rho_empirical(rho_in, ...) ~ probe."""
+    """Bisect to find rho_in such that _mean_rho_empirical(rho_in, ...) ~ probe.
+
+    Precomputes rho-independent arrays once, then calls _eval_mean_rho for
+    each bisection step (~27×), avoiding redundant RNG and x-ranking work.
+    """
+    arrays = _precompute_calibration_arrays_empirical(template, pool, n_cal, seed)
+
     lo, hi = 0.0, min(probe * 2.0, 0.999)
-    if _mean_rho_empirical(hi, template, pool, n_cal, seed) < probe:
+    val_hi = _eval_mean_rho(hi, *arrays)
+    if val_hi < probe:
         hi = 0.999
-    if _mean_rho_empirical(hi, template, pool, n_cal, seed) < probe:
+        val_hi = _eval_mean_rho(hi, *arrays)
+    if val_hi < probe:
         return None
 
     for _ in range(n_iter):
         mid = (lo + hi) / 2.0
-        observed = _mean_rho_empirical(mid, template, pool, n_cal, seed)
+        observed = _eval_mean_rho(mid, *arrays)
         if observed < probe:
             lo = mid
         else:
@@ -806,7 +1033,9 @@ def _bisect_for_probe_empirical(probe, template, pool, n_cal, seed,
         if hi - lo < tol:
             break
 
-    return (lo + hi) / 2.0
+    val_lo = _eval_mean_rho(lo, *arrays)
+    val_hi = _eval_mean_rho(hi, *arrays)
+    return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
 
 
 def _calibrate_rho_multipoint_empirical(n, n_distinct, distribution_type,
@@ -904,6 +1133,97 @@ def calibrate_rho_empirical(n, n_distinct, distribution_type, rho_target, pool,
     return float(np.clip(result, -0.999, 0.999))
 
 
+def warm_calibration_cache(generator, y_params, cases=None,
+                           n_distinct_values=None, dist_types=None,
+                           freq_dict=None, calibration_mode="multipoint",
+                           n_cal=300, seed=99):
+    """Pre-build and cache calibration curves for all scenarios in the grid.
+
+    Without this, the first call to run_all_scenarios pays calibration cost
+    (~0.3s per unique (n, k, dist_type) combo) while subsequent calls reuse
+    the cache — making multi-point G estimation unreliable.
+
+    Parameters
+    ----------
+    generator : str
+        'nonparametric', 'copula', or 'empirical'. Linear has no calibration.
+    y_params : dict
+        Must contain 'median', 'iqr', 'range' keys.
+    cases : dict or None
+        Case definitions (default: config.CASES).
+    n_distinct_values : list of int or None
+        Default: config.N_DISTINCT_VALUES.
+    dist_types : list of str or None
+        Default: config.DISTRIBUTION_TYPES.
+    calibration_mode : str
+        'multipoint' or 'single'.
+    n_cal : int
+        Calibration samples per bisection.
+    seed : int
+        Seed for calibration RNG.
+
+    Returns
+    -------
+    int
+        Number of calibration entries built.
+    """
+    from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
+
+    if cases is None:
+        cases = CASES
+    if n_distinct_values is None:
+        n_distinct_values = N_DISTINCT_VALUES
+    if dist_types is None:
+        dist_types = DISTRIBUTION_TYPES
+
+    if generator == "linear":
+        return 0
+
+    probe_rho = 0.30
+    built = 0
+
+    for case_id, case in cases.items():
+        n = case["n"]
+        case_y_params = {"median": case["median"], "iqr": case["iqr"],
+                         "range": case["range"]}
+
+        for k in n_distinct_values:
+            for dt in dist_types:
+                if generator == "nonparametric":
+                    calibrate_rho(n, k, dt, probe_rho, case_y_params,
+                                  all_distinct=False, n_cal=n_cal, seed=seed,
+                                  freq_dict=freq_dict,
+                                  calibration_mode=calibration_mode)
+                elif generator == "copula":
+                    calibrate_rho_copula(n, k, dt, probe_rho, case_y_params,
+                                        all_distinct=False, n_cal=n_cal,
+                                        seed=seed, freq_dict=freq_dict)
+                elif generator == "empirical":
+                    pool = get_pool(n)
+                    calibrate_rho_empirical(n, k, dt, probe_rho, pool,
+                                           all_distinct=False, n_cal=n_cal,
+                                           seed=seed, freq_dict=freq_dict,
+                                           calibration_mode=calibration_mode)
+                built += 1
+
+        # All-distinct scenario
+        if generator == "nonparametric":
+            calibrate_rho(n, n, None, probe_rho, case_y_params,
+                          all_distinct=True, n_cal=n_cal, seed=seed,
+                          calibration_mode=calibration_mode)
+        elif generator == "copula":
+            calibrate_rho_copula(n, n, None, probe_rho, case_y_params,
+                                all_distinct=True, n_cal=n_cal, seed=seed)
+        elif generator == "empirical":
+            pool = get_pool(n)
+            calibrate_rho_empirical(n, n, None, probe_rho, pool,
+                                   all_distinct=True, n_cal=n_cal, seed=seed,
+                                   calibration_mode=calibration_mode)
+        built += 1
+
+    return built
+
+
 def generate_y_nonparametric(x, rho_s, y_params, rng=None,
                              _calibrated_rho=None, _ln_params=None):
     """Generate y via calibrated rank-mixing to target Spearman *rho_s*.
@@ -973,9 +1293,10 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
     sd_x = np.where(sd_x > 0, sd_x, 1.0)   # avoid divide-by-zero (matches 1D guard)
     s_x /= sd_x
 
-    # Standardize noise_ranks per row
-    s_n = noise_ranks - noise_ranks.mean(axis=1, keepdims=True)
-    s_n /= noise_ranks.std(axis=1, keepdims=True, ddof=0)
+    # Noise ranks are always permutations of 1..n, so mean and std are constants
+    noise_mean = (n + 1) / 2.0
+    noise_std = np.sqrt((n * n - 1) / 12.0)
+    s_n = (noise_ranks - noise_mean) / noise_std
 
     rho_c = np.clip(rho_input, -0.999, 0.999)
     mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n   # (n_sims, n)

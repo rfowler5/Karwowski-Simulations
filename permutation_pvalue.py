@@ -15,7 +15,8 @@ from config import (PVALUE_PRECOMPUTED_N_PRE, N_PERM_DEFAULT, N_PERM_LOW_SIMS,
                     N_SIMS_THRESHOLD_FOR_N_PERM, PVALUE_N_SIMS_BATCH_THRESHOLD,
                     PVALUE_N_SIMS_CHUNK_SIZE, PVALUE_MC_ON_CACHE_MISS)
 from spearman_helpers import (spearman_rho_2d, _batch_permutation_rhos_jit,
-                              use_numba)
+                              _batch_permutation_rhos_preranked_jit,
+                              _rank_rows, _pearson_on_rank_arrays, use_numba)
 
 
 _NULL_CACHE = {}
@@ -44,8 +45,17 @@ def _build_x_midranks(x_counts):
 def get_precomputed_null(n, all_distinct, x_counts, n_pre=None, rng=None):
     """Return sorted |null_rho| array for the given tie structure.
 
-    Auto-builds on cache miss (~1s for n≈80, n_pre=50k). Cached for
-    future calls with the same (n, all_distinct, tuple(x_counts)) key.
+    Auto-builds on cache miss (~0.3s for n≈80, n_pre=50k via vectorised
+    matmul). Cached for future calls with the same
+    (n, all_distinct, tuple(x_counts)) key.
+
+    The generator (nonparametric, copula, linear) is intentionally not part
+    of the cache key.  All non-empirical generators produce continuous y with
+    no ties, so under H0 the y-ranks are a uniform random permutation of
+    {1,...,n} regardless of how y was generated.  The permutation null
+    distribution of Spearman rho therefore depends only on n and the x tie
+    structure, not on the generator.  The same cached null is correctly reused
+    across all non-empirical generators for the same scenario.
 
     Parameters
     ----------
@@ -85,17 +95,17 @@ def get_precomputed_null(n, all_distinct, x_counts, n_pre=None, rng=None):
     if sx > 0:
         x_std = x_std / sx
 
-    # Generate n_pre random permutations of {1, ..., n} and compute Pearson
-    # correlation with x_std for each.
-    base_ranks = np.arange(1.0, n + 1.0)
-    null_rhos = np.empty(n_pre, dtype=np.float64)
-    for i in range(n_pre):
-        perm_y = rng.permutation(base_ranks)
-        y_std = perm_y - np.mean(perm_y)
-        sy = np.std(perm_y, ddof=0)
-        if sy > 0:
-            y_std = y_std / sy
-        null_rhos[i] = np.dot(x_std, y_std) / n
+    std_y = np.sqrt((n * n - 1) / 12.0)
+
+    # Vectorised: generate all n_pre permutations at once (argsort of random
+    # floats, same pattern as _mc_batch), then a single matmul for all rhos.
+    # x_std is zero-mean so dot(x_std, perm_y - mean_y) = dot(x_std, perm_y).
+    all_perm_y = np.argsort(rng.random((n_pre, n)), axis=1) + 1.0
+    # std_y > 0 for all n >= 2; guard retained for defensive completeness
+    if std_y > 0:
+        null_rhos = (all_perm_y @ x_std) / (std_y * n)
+    else:
+        null_rhos = np.zeros(n_pre, dtype=np.float64)
 
     sorted_abs_null = np.sort(np.abs(null_rhos))
     _NULL_CACHE[key] = sorted_abs_null
@@ -206,7 +216,11 @@ def pvalues_mc(x_all, y_all, n_perm, alpha, rng,
 
 
 def _mc_batch(x_chunk, y_chunk, rhos_obs_chunk, n_perm, rng):
-    """Run one MC batch: generate perm indices, compute perm rhos, return p-values."""
+    """Run one MC batch: generate perm indices, compute perm rhos, return p-values.
+
+    Precomputes x-ranks once per simulation (x does not change across
+    permutations), halving the rank computation vs. ranking x inside the loop.
+    """
     chunk_size, n = x_chunk.shape
 
     # Generate permutation indices: argsort of random floats gives permutations
@@ -214,19 +228,27 @@ def _mc_batch(x_chunk, y_chunk, rhos_obs_chunk, n_perm, rng):
         rng.random((n_perm, chunk_size, n)), axis=2
     ).astype(np.int32)
 
-    if use_numba() and _batch_permutation_rhos_jit is not None:
+    if use_numba() and _batch_permutation_rhos_preranked_jit is not None:
+        # Precompute x-ranks once per sim (constant across permutations)
+        rx_all = _rank_rows(x_chunk.astype(np.float64))
+        perm_rhos = _batch_permutation_rhos_preranked_jit(
+            rx_all,
+            y_chunk.astype(np.float64),
+            perm_idx)
+    elif use_numba() and _batch_permutation_rhos_jit is not None:
         perm_rhos = _batch_permutation_rhos_jit(
             x_chunk.astype(np.float64),
             y_chunk.astype(np.float64),
             perm_idx)
     else:
-        # Pure NumPy/Python fallback
+        # Pure NumPy fallback: precompute x-ranks once, rank only y per perm
+        rx_all = _rank_rows(x_chunk)
         perm_rhos = np.empty((chunk_size, n_perm), dtype=np.float64)
+        rows = np.arange(chunk_size)[:, None]
         for b in range(n_perm):
-            # perm_idx[b] has shape (chunk_size, n)
-            rows = np.arange(chunk_size)[:, None]
             y_perm = y_chunk[rows, perm_idx[b]]
-            perm_rhos[:, b] = spearman_rho_2d(x_chunk, y_perm)
+            ry = _rank_rows(y_perm)
+            perm_rhos[:, b] = _pearson_on_rank_arrays(rx_all, ry)
 
     abs_obs = np.abs(rhos_obs_chunk)[:, np.newaxis]   # (chunk_size, 1)
     abs_perm = np.abs(perm_rhos)                       # (chunk_size, n_perm)
