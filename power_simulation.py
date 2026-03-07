@@ -31,6 +31,7 @@ from joblib import Parallel, delayed
 
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_SIMS, ALPHA, TARGET_POWER, N_CAL,
+                    RHO_SEARCH_POSITIVE, RHO_SEARCH_NEGATIVE,
                     POWER_SEARCH_DIRECTION, CALIBRATION_MODE,
                     VECTORIZE_DATA_GENERATION,
                     USE_PERMUTATION_PVALUE, N_PERM_DEFAULT, N_PERM_LOW_SIMS,
@@ -205,7 +206,7 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
     Parameters
     ----------
     direction : str
-        'positive' searches [0.25, 0.42]; 'negative' searches [-0.42, -0.25].
+        'positive' searches RHO_SEARCH_POSITIVE; 'negative' searches RHO_SEARCH_NEGATIVE (config).
     freq_dict : dict or None
         Custom frequency dictionary for distribution_type "custom".
     n_cal : int or None
@@ -223,9 +224,10 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
         n_cal = N_CAL
 
     if direction == "positive":
-        lo, hi = 0.25, 0.42
+        lo, hi = RHO_SEARCH_POSITIVE
     else:
-        lo, hi = -0.42, -0.25
+        lo, hi = RHO_SEARCH_NEGATIVE
+    lo_bound, hi_bound = lo, hi
 
     while hi - lo > tolerance:
         mid = (lo + hi) / 2.0
@@ -245,7 +247,14 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
             else:
                 lo = mid
 
-    return (lo + hi) / 2.0
+    result = (lo + hi) / 2.0
+    boundary_tolerance = 1e-4
+    if abs(result - lo_bound) < boundary_tolerance or abs(result - hi_bound) < boundary_tolerance:
+        warnings.warn(
+            f"min_detectable_rho hit search boundary ({result:.4f}). "
+            "Consider widening RHO_SEARCH bounds.",
+            UserWarning, stacklevel=2)
+    return result
 
 
 def _search_directions(case_id):

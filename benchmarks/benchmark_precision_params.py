@@ -1,17 +1,18 @@
 """
 Compute (n_sims, n_cal) and (n_reps, n_boot) for target accuracy tiers.
 
-Pure arithmetic from README formulas. No project imports. Run from any directory.
+Pure arithmetic from README formulas. Run from project root so config is importable.
 Output is suitable for pasting into README or for use by benchmark_realistic_runtimes.py.
 """
 import math
+import sys
+from pathlib import Path
 
-# Target half-widths (95% CI half-width for min detectable rho or CI endpoint)
-TIERS = [
-    (0.01, "+/-0.01"),
-    (0.002, "+/-0.002"),
-    (0.001, "+/-0.001"),
-]
+_root = Path(__file__).resolve().parents[1]
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from config import TIERS
 
 # Power: SE_bisection = c/sqrt(n_sims), SE_cal = k/sqrt(n_cal)
 # SE_total = sqrt(SE_bisection^2 + SE_cal^2), half_width = 1.96 * SE_total

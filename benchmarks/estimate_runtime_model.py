@@ -43,7 +43,7 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from config import CASES
+from config import CASES, POWER_TIERS, CI_TIERS
 from power_simulation import min_detectable_rho, run_all_scenarios
 from confidence_interval_calculator import bootstrap_ci_averaged, run_all_ci_scenarios
 from data_generator import digitized_available, warm_calibration_cache
@@ -57,17 +57,6 @@ CASE_ID = 3
 DIST_TYPE_SINGLE = "heavy_center"
 N_DISTINCT_SINGLE = 4
 EFFICIENCY = 0.5  # empirical parallel efficiency (benchmark_realistic_runtimes)
-
-POWER_TIERS = [
-    (2220, 1000),      # +/-0.01
-    (55520, 24100),    # +/-0.002
-    (222050, 96400),   # +/-0.001
-]
-CI_TIERS = [
-    (650, 500),        # +/-0.01
-    (16240, 500),      # +/-0.002
-    (64930, 500),      # +/-0.001
-]
 
 FIT_N_SIMS_BY_GENERATOR = {
     "empirical":     [50, 75, 100],

@@ -9,7 +9,7 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import time
-from confidence_interval_calculator import run_all_ci_scenarios, bootstrap_ci_averaged, bootstrap_ci_single
+from confidence_interval_calculator import run_all_ci_scenarios, bootstrap_ci_averaged
 import numba
 from joblib.externals.loky import get_reusable_executor
 from config import CASES
@@ -17,7 +17,6 @@ case = CASES[3]
 
 # Warm up Numba
 print("Warming up Numba (one scenario each path)...")
-# bootstrap_ci_single(x, y, 0.3, n_boot=200, rng=np.random.default_rng(1))
 y = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
 bootstrap_ci_averaged(73, 4, "even", -0.13, y, generator="nonparametric",
     n_reps=5, n_boot=10, seed=0, batch_bootstrap=False, calibration_mode="single")

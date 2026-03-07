@@ -465,6 +465,7 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None,
         else:
             mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
         y_values = rng.lognormal(mean=mu, sigma=sigma, size=n)
+        y_values.sort()
     elif marginal == "empirical":
         if pool is None:
             raise ValueError("pool required for empirical marginal")
@@ -474,7 +475,6 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None,
         y_values = np.sort(pool)
     else:
         raise ValueError(f"Unknown marginal: {marginal}")
-    y_values.sort()
 
     y_final = np.empty(n)
     y_final[np.argsort(mixed)] = y_values
@@ -1307,6 +1307,7 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
         else:
             mu, sigma = _fit_lognormal(y_params["median"], y_params["iqr"])
         y_values = rng.lognormal(mean=mu, sigma=sigma, size=(n_sims, n))
+        y_values.sort(axis=1)
     elif marginal == "empirical":
         if pool is None:
             raise ValueError("pool required for empirical marginal")
@@ -1317,7 +1318,6 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
         y_values = np.sort(pool, axis=1)
     else:
         raise ValueError(f"Unknown marginal: {marginal}")
-    y_values.sort(axis=1)
 
     # Assign: for each row, place sorted y_values at the argsort of mixed
     order = np.argsort(mixed, axis=1)                       # (n_sims, n)

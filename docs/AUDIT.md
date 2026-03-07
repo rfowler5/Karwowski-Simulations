@@ -125,7 +125,7 @@ Users requiring exact permutation p-values can set
 
 ## Fixes Required
 
-### FIX-1 — Silent boundary return in `min_detectable_rho` [MEDIUM]
+### FIX-1 — Silent boundary return in `min_detectable_rho` [MEDIUM] [DONE]
 **File:** `power_simulation.py`
 **Issue:** Bisection searches in `[0.25, 0.42]` for positive direction and
 `[-0.42, -0.25]` for negative. If the true min detectable rho falls outside
@@ -146,7 +146,7 @@ if abs(result - lo_bound) < tolerance or abs(result - hi_bound) < tolerance:
 return result
 ```
 
-### FIX-2 — Dead config values [LOW]
+### FIX-2 — Dead config values [LOW] [DONE]
 **File:** `config.py`
 **Issue:** `RHO_SEARCH_POSITIVE = (0.0, 0.6)` and
 `RHO_SEARCH_NEGATIVE = (-0.6, 0.0)` are defined but never used.
@@ -156,7 +156,7 @@ return result
 hardcoded values with a comment explaining why they're tighter than the
 config range.
 
-### FIX-3 — Double `.sort()` calls [LOW]
+### FIX-3 — Double `.sort()` calls [LOW] [DONE]
 **File:** `data_generator.py`
 **Issue:** In `_raw_rank_mix` (around line 440-443) and `_raw_rank_mix_batch`
 (around line 996-999), the empirical branch sorts the pool array, then the
@@ -167,7 +167,7 @@ empirical branch already called `np.sort(pool)` at line 440.
 In `_raw_rank_mix_batch`, line 999 `y_values.sort(axis=1)` is redundant
 when the empirical branch already called `np.sort(pool, axis=1)` at line 996.
 
-### FIX-4 — Unused import [LOW]
+### FIX-4 — Unused import [LOW] [DONE]
 **File:** `benchmarks/benchmark_full_grid.py`
 **Issue:** `bootstrap_ci_single` is imported but never called in the script.
 **Fix:** Remove from the import line.

@@ -237,8 +237,13 @@ N_BOOTSTRAP = 1000 # Don't need 10,000 for CI, 1000 is enough
 ALPHA = 0.05
 TARGET_POWER = 0.80
 
-RHO_SEARCH_POSITIVE = (0.0, 0.6)
-RHO_SEARCH_NEGATIVE = (-0.6, 0.0)
+# Bisection search bounds for min_detectable_rho (used by power_simulation.py).
+# Deliberately tighter than [0, 1] based on prior runs and asymptotic-with-ties
+# approximations showing the answer is ~0.30-0.33 for study parameters
+# (n=73-82, alpha=0.05, 80% power). Tighter bounds reduce bisection iterations.
+# Widen if parameters change and the boundary warning fires.
+RHO_SEARCH_POSITIVE = (0.25, 0.42)
+RHO_SEARCH_NEGATIVE = (-0.42, -0.25)
 
 # "needed_direction_only" (default) or "both_directions"
 POWER_SEARCH_DIRECTION = "needed_direction_only"
@@ -298,3 +303,25 @@ PVALUE_MC_ON_CACHE_MISS = False
 # still fall through to the MC path until the null is built and cached.
 # This is correct behavior — the speedup applies once the cache is warm.
 EMPIRICAL_USE_PRECOMPUTED_NULL = True
+
+# ---------------------------------------------------------------------------
+# Benchmark precision tiers (power and CI)
+# Used by benchmarks/estimate_runtime_model.py, benchmarks/benchmark_realistic_runtimes.py,
+# and benchmarks/benchmark_precision_params.py.
+# TIERS: target half-widths (95% CI) and labels; (n_sims, n_cal) for power; (n_reps, n_boot) for CI.
+# ---------------------------------------------------------------------------
+TIERS = [
+    (0.01, "+/-0.01"),
+    (0.002, "+/-0.002"),
+    (0.001, "+/-0.001"),
+]
+POWER_TIERS = [
+    (2220, 1000),      # +/-0.01   (C_BISECTION = 0.17, C_CAL = 0.112)
+    (55520, 24100),    # +/-0.002  (C_BISECTION = 0.17, C_CAL = 0.112)
+    (222050, 96400),   # +/-0.001  (C_BISECTION = 0.17, C_CAL = 0.112)
+]
+CI_TIERS = [
+    (650, 500),        # +/-0.01   (SD_INTER_REP = 0.13)
+    (16240, 500),      # +/-0.002  (SD_INTER_REP = 0.13)
+    (64930, 500),      # +/-0.001  (SD_INTER_REP = 0.13)
+]
