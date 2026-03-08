@@ -2,7 +2,7 @@
 Test runner.
 
 Quick (default): runs core tests (fast, foundational first).
-Full (--full):   adds slower parallelism/benchmarking tests.
+Full (--full):   adds slower test calibration accuracy (with --strict)/parallelism/benchmarking tests.
 
 Calibration test: by default runs without --strict (reports flags only).
 Use --strict with quick/full to make calibration exit 1 if any scenario is flagged.
@@ -79,8 +79,7 @@ QUICK_TESTS = [
 FULL_ONLY_TESTS = [
     # These two calibration accuracy tests do a full sweep over all the cases to spot potential areas of structural bias.
     # These n-sims and n-cal were chosen because that's where it is known that they all currently pass--nothing flagged.
-    ("test_calibration_accuracy.py", ["--n-sims 1000", "--n-cal 2000" "--generators copula,empirical", "--strict"]),
-    ("test_calibration_accuracy.py", ["--n-sims 1000", "--n-cal 2000" "--generators parametric", "--strict"]),
+    ("test_calibration_accuracy.py", ["--n-sims", "1000", "--n-cal", "2000", "--strict"]),
     # These spawn subprocesses or run long MC loops; too slow for quick.
     ("test_nested_parallelism.py", ["--compare"]),           # nested multiprocessing deadlock / correctness check
     ("test_batch_sequential_vs_parallel.py", ["--compare"]), # batch vs sequential output agreement under parallelism

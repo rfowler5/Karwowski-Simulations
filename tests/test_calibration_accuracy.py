@@ -163,7 +163,7 @@ def run_accuracy_tests(generators=None, rho_targets=None, n_sims=50,
     pd.DataFrame
     """
     if generators is None:
-        generators = ["nonparametric", "copula", "linear"]
+        generators = ["nonparametric", "copula", "empirical"] # no linear cause not using calibration right now.
     if rho_targets is None:
         rho_targets = DEFAULT_RHO_TARGETS
 
