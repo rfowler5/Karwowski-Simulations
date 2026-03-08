@@ -196,6 +196,16 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     return np.sum(pvals < alpha) / n_sims
 
 
+def _check_and_warn_boundary(result, lo_bound, hi_bound, boundary_tolerance=1e-4):
+    """Emit UserWarning if bisection result is within tolerance of a search boundary."""
+    if abs(result - lo_bound) < boundary_tolerance or abs(result - hi_bound) < boundary_tolerance:
+        warnings.warn(
+            f"min_detectable_rho hit search boundary ({result:.4f}). "
+            "Consider widening RHO_SEARCH bounds.",
+            UserWarning, stacklevel=3)
+    return
+
+
 def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                        generator="nonparametric", target_power=None,
                        n_sims=None, alpha=None, all_distinct=False,
@@ -248,12 +258,7 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                 lo = mid
 
     result = (lo + hi) / 2.0
-    boundary_tolerance = 1e-4
-    if abs(result - lo_bound) < boundary_tolerance or abs(result - hi_bound) < boundary_tolerance:
-        warnings.warn(
-            f"min_detectable_rho hit search boundary ({result:.4f}). "
-            "Consider widening RHO_SEARCH bounds.",
-            UserWarning, stacklevel=2)
+    _check_and_warn_boundary(result, lo_bound, hi_bound)
     return result
 
 

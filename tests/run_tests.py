@@ -29,23 +29,61 @@ CALIBRATION_QUICK_ARGV = [
 ]
 
 QUICK_TESTS = [
-    ("test_freq_dict_sums_to_n.py", []),
-    ("test_spearman_2d.py", []),
-    ("test_batch_bootstrap_ci.py", []),
-    ("test_calibration_precompute.py", []),  # unit tests for precompute/eval split; run before calibration_accuracy so failures pinpoint the refactored path
-    ("test_calibration_accuracy.py", None),  # filled in main() with CALIBRATION_QUICK_ARGV ± --strict
-    ("test_asymptotic_formulas.py", []),
-    ("test_reproducibility.py", []),
-    ("test_empirical_invalid_n.py", []),
-    ("test_empirical_generator.py", []),
-    ("test_permutation_pvalue.py", []),
-    ("test_power_sanity.py", []),
-    ("test_rng_data_independence.py", []),
+    # --- Pure unit tests: no simulation, no calibration ---
+    # Run these first so a low-level failure is diagnosed before any MC test obscures it.
+    ("test_freq_dict_sums_to_n.py", []),         # freq_dict arithmetic; no dependencies
+    ("test_data_generator.py", []),              # TEST-4/5: _fit_lognormal, _interp_with_extrapolation; pure math, no MC; before calibration because calibration calls these helpers
+    ("test_spearman_2d.py", []),                 # rank/correlation core math; before anything that calls spearman_rho_2d
+
+    # --- Bootstrap / CI ---
+    # Depends on data generation working (caught above) but not on calibration.
+    ("test_batch_bootstrap_ci.py", []),          # batch vs single bootstrap CI agreement; no calibration dependency
+
+    # --- Calibration stack (ordered: unit → accuracy → symmetry) ---
+    # Precompute first: if the precompute/eval split is broken, later calibration tests
+    # would all fail with the same root cause, making diagnosis harder.
+    ("test_calibration_precompute.py", []),      # precompute/eval split unit tests; run before calibration_accuracy so failures pinpoint the refactored path
+    ("test_calibration_accuracy.py", None),      # filled in main() with CALIBRATION_QUICK_ARGV ± --strict; after precompute so a precompute bug is caught first
+    ("test_calibration_symmetry.py", []),        # TEST-3: calibrate_rho(+rho) == -calibrate_rho(-rho); after accuracy so a broken table is caught before testing sign logic on top of it
+
+    # --- Asymptotic formulas ---
+    # No MC, no calibration; independent of the calibration stack above.
+    ("test_asymptotic_formulas.py", []),         # TEST-2/6: spearman_var_h0 monotonicity + all four cases; purely analytic
+
+    # --- Reproducibility / RNG ---
+    # Depends on data generation and simulation being correct (validated above).
+    ("test_reproducibility.py", []),             # seed-reproducibility of spearman_rho_2d and power estimates; after core correctness tests
+
+    # --- Empirical generator ---
+    # invalid_n first: if the generator crashes on bad input it will also crash the
+    # longer empirical_generator test, so invalid_n gives the cleaner failure message.
+    ("test_empirical_invalid_n.py", []),         # edge-case guard: empirical generator raises on n outside digitized data range
+    ("test_empirical_generator.py", []),         # integration test for empirical generator output; after invalid_n
+
+    # --- Permutation p-value ---
+    # Independent of calibration and empirical generator; tests permutation_pvalue.py in isolation.
+    ("test_permutation_pvalue.py", []),          # Davison-Hinkley p-value formula and null construction
+
+    # --- Power simulation ---
+    # boundary_warning first: it tests _check_and_warn_boundary, a helper called inside
+    # min_detectable_rho.  If the helper is broken, power_sanity's MC run is wasted.
+    ("test_boundary_warning.py", []),            # TEST-1: _check_and_warn_boundary deterministic helper; no MC, < 1 ms; before power_sanity which calls min_detectable_rho end-to-end
+    ("test_power_sanity.py", []),                # end-to-end min_detectable_rho with MC; last substantial MC test
+
+    # --- RNG independence ---
+    # Last: integration-level check that data_rng and boot_rng streams don't cross-contaminate.
+    # Placed after all functional tests so a contamination failure is not confused with a correctness bug.
+    ("test_rng_data_independence.py", []),       # verifies SeedSequence.spawn(2) produces independent streams
 ]
 
 FULL_ONLY_TESTS = [
-    ("test_nested_parallelism.py", ["--compare"]),
-    ("test_batch_sequential_vs_parallel.py", ["--compare"]),
+    # These two calibration accuracy tests do a full sweep over all the cases to spot potential areas of structural bias.
+    # These n-sims and n-cal were chosen because that's where it is known that they all currently pass--nothing flagged.
+    ("test_calibration_accuracy.py", ["--n-sims 1000", "--n-cal 2000" "--generators copula,empirical", "--strict"]),
+    ("test_calibration_accuracy.py", ["--n-sims 1000", "--n-cal 2000" "--generators parametric", "--strict"]),
+    # These spawn subprocesses or run long MC loops; too slow for quick.
+    ("test_nested_parallelism.py", ["--compare"]),           # nested multiprocessing deadlock / correctness check
+    ("test_batch_sequential_vs_parallel.py", ["--compare"]), # batch vs sequential output agreement under parallelism
 ]
 
 

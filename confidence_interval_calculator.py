@@ -48,7 +48,7 @@ from joblib import Parallel, delayed
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_BOOTSTRAP, ALPHA, ASYMPTOTIC_TIE_CORRECTION_MODE,
                     CALIBRATION_MODE, VECTORIZE_DATA_GENERATION,
-                    BATCH_CI_BOOTSTRAP)
+                    BATCH_CI_BOOTSTRAP, N_CAL)
 from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             digitized_available, generate_y_empirical,
                             generate_y_empirical_batch, generate_y_linear,
@@ -175,7 +175,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                            generator="nonparametric", n_reps=200, n_boot=None,
                            alpha=None, all_distinct=False, seed=None,
                            freq_dict=None, calibration_mode=None, vectorize=None,
-                           batch_bootstrap=None):
+                           batch_bootstrap=None, n_cal=None):
     """Average bootstrap CI endpoints over *n_reps* independent datasets.
 
     This is the correct approach when working with simulated (not observed)
@@ -187,6 +187,12 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
     ----------
     freq_dict : dict or None
         Custom frequency dictionary for distribution_type "custom".
+    n_cal : int or None
+        Calibration samples.  When None, uses config N_CAL (default 300).
+        Calibration noise shifts CI endpoints but not CI width.  For
+        accurate absolute endpoint values, set n_cal to the tier value
+        from config.CI_TIERS (e.g. 1000 for ±0.01).  See
+        docs/UNCERTAINTY_BUDGET.md Part 2 for the full budget.
 
     Returns
     -------
@@ -209,6 +215,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         vectorize = VECTORIZE_DATA_GENERATION
     if batch_bootstrap is None:
         batch_bootstrap = BATCH_CI_BOOTSTRAP
+    if n_cal is None:
+        n_cal = N_CAL
 
     if generator == "empirical" and not digitized_available():
         warnings.warn(
@@ -256,17 +264,17 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         cal_rho = calibrate_rho(
             n, n_distinct, distribution_type, rho_s, y_params,
             all_distinct=all_distinct, freq_dict=freq_dict,
-            calibration_mode=calibration_mode)
+            calibration_mode=calibration_mode, n_cal=n_cal)
     elif generator == "copula":
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict)
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal)
     elif generator == "empirical":
         pool = get_pool(n)
         cal_rho = calibrate_rho_empirical(
             n, n_distinct, distribution_type, rho_s, pool,
             all_distinct=all_distinct, freq_dict=freq_dict,
-            calibration_mode=calibration_mode)
+            calibration_mode=calibration_mode, n_cal=n_cal)
 
     if batch_bootstrap and vectorize:
         # --- NEW BATCH PATH ---
@@ -378,7 +386,7 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
 
 def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
                      n_reps, n_boot, alpha, tie_correction_mode, seed,
-                     calibration_mode=None, batch_bootstrap=None):
+                     calibration_mode=None, batch_bootstrap=None, n_cal=None):
     """Run bootstrap CI + asymptotic CI for a single scenario."""
     n = case["n"]
     rho_obs = case["observed_rho"]
@@ -391,7 +399,8 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
         n, k, dt, rho_obs, y_params,
         generator=generator, n_reps=n_reps, n_boot=n_boot,
         alpha=alpha, all_distinct=all_distinct, seed=seed,
-        calibration_mode=calibration_mode, batch_bootstrap=batch_bootstrap)
+        calibration_mode=calibration_mode, batch_bootstrap=batch_bootstrap,
+        n_cal=n_cal)
 
     asym = _asymptotic_ci_results(
         rho_obs, n, alpha, x_counts, tie_correction_mode)
@@ -415,7 +424,8 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
 
 def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
-                         n_jobs=1, calibration_mode=None, batch_bootstrap=None):
+                         n_jobs=1, calibration_mode=None, batch_bootstrap=None,
+                         n_cal=None):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.
 
     Uses bootstrap_ci_averaged (n_reps independent datasets, each
@@ -425,6 +435,11 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
     ----------
     n_jobs : int
         Number of parallel jobs (1 = sequential, -1 = all cores).
+    n_cal : int or None
+        Calibration samples per scenario.  When None, uses config N_CAL
+        (default 300).  Calibration noise shifts CI endpoints (absolute
+        values) but not CI width.  Use the n_cal values from config.CI_TIERS
+        for accuracy guarantees; see docs/UNCERTAINTY_BUDGET.md Part 2.
 
     Returns
     -------
@@ -447,14 +462,14 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                 scenarios.append((case_id, case, k, dt, False,
                                   generator, n_reps, n_boot, alpha,
                                   tie_correction_mode, sc_seed,
-                                  calibration_mode, batch_bootstrap))
+                                  calibration_mode, batch_bootstrap, n_cal))
                 scenario_idx += 1
 
         sc_seed = (seed + scenario_idx) if seed is not None else None
         scenarios.append((case_id, case, n, None, True,
                           generator, n_reps, n_boot, alpha,
                           tie_correction_mode, sc_seed,
-                          calibration_mode, batch_bootstrap))
+                          calibration_mode, batch_bootstrap, n_cal))
         scenario_idx += 1
 
     if n_jobs == 1:

@@ -48,11 +48,31 @@ from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES, CALIBRATION_MOD
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
                             calibrate_rho_empirical, generate_y_empirical,
-                            get_pool, generate_y_nonparametric, _fit_lognormal)
+                            get_pool, generate_y_nonparametric, _fit_lognormal,
+                            _mean_rho_vec, _get_x_template,
+                            _precompute_calibration_arrays, _eval_mean_rho,
+                            _eval_mean_rho_fast)
 
 
 DEFAULT_RHO_TARGETS = [0.30, -0.30]
 FLAG_THRESHOLD = 0.01
+
+
+def test_skip_y_identity():
+    """Verify rank(y_final) = rank(mixed) for lognormal y.
+
+    Uses the same s_x, s_n, x_ranks_batch from _precompute_calibration_arrays
+    for both paths so the comparison is apples-to-apples.
+    """
+    template = _get_x_template(80, 4, "even", None, False)
+    y_params = {"median": 15.0, "iqr": 12.0, "range": (0.9, 76.4)}
+    s_x, s_n, y_batch_sorted, x_ranks_batch = (
+        _precompute_calibration_arrays(template, y_params, 1000, 42))
+    for rho_in in [0.1, 0.3, 0.5, 0.7]:
+        val_full = _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch)
+        val_fast = _eval_mean_rho_fast(rho_in, s_x, s_n, x_ranks_batch)
+        assert abs(val_full - val_fast) < 1e-10, (
+            "rho_in=%s: full=%s, fast=%s" % (rho_in, val_full, val_fast))
 
 
 def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
@@ -299,6 +319,7 @@ def main(n_sims=50, generators=None, rho_targets=None, cases=None,
     -------
     pd.DataFrame
     """
+    test_skip_y_identity()
     global FLAG_THRESHOLD
     FLAG_THRESHOLD = threshold
 
@@ -320,6 +341,107 @@ def main(n_sims=50, generators=None, rho_targets=None, cases=None,
             print(f"\nResults saved to {outfile}")
 
     return df
+
+
+def test_multipoint_interpolation_deviation(
+        n_cal_calibration=300,
+        n_cal_evaluation=5000,
+        calibration_seed=99,
+        evaluation_seed=12345,
+        verbose=True):
+    """Measure multipoint calibration accuracy for highly-tied x.
+
+    Note: Slow (~60-120s) due to 5000-cal evaluation x 57 rho values x 3 structures.
+
+    Sweeps target_rho, computes calibrated rho_in via multipoint calibration,
+    then evaluates realised mean Spearman rho at that rho_in with high n_cal.
+    Reports max and mean |deviation| per tie structure. Used to detect
+    systematic interpolation bias when the calibration function has step
+    discontinuities (e.g. k=4 or k=9 equal groups).
+
+    Parameters
+    ----------
+    n_cal_calibration : int
+        Calibration samples (default 300, matches production).
+    n_cal_evaluation : int
+        Samples for measuring realised rho (default 5000, reduces MC noise).
+    calibration_seed, evaluation_seed : int
+        Seeds for calibration vs evaluation (different to avoid overfitting).
+    verbose : bool
+        If True, print table and summary per tie structure.
+
+    Returns
+    -------
+    dict
+        Keys: tie structure labels. Values: dict with max_abs_deviation,
+        mean_abs_deviation, high_deviation_points, table (list of rows).
+    """
+    n = 80
+    case = CASES[1]
+    y_params = {"median": case["median"], "iqr": case["iqr"],
+                "range": case["range"]}
+
+    target_rhos = np.arange(0.05, 0.61, 0.01)
+    HIGH_DEVIATION_THRESHOLD = 0.015
+
+    structures = [
+        ("k=4 even", 4, "even", False, None),
+        ("k=9 even", 9, "even", False, None),
+        ("all_distinct", n, None, True, None),
+    ]
+
+    results = {}
+    for label, n_distinct, distribution_type, all_distinct, freq_dict in structures:
+        template = _get_x_template(
+            n, n_distinct, distribution_type, freq_dict, all_distinct)
+        rows = []
+        deviations = []
+        high_deviation_points = []
+
+        for target_rho in target_rhos:
+            calibrated_rho_in = calibrate_rho(
+                n, n_distinct, distribution_type, target_rho, y_params,
+                all_distinct=all_distinct, n_cal=n_cal_calibration,
+                seed=calibration_seed, freq_dict=freq_dict,
+                calibration_mode="multipoint")
+            realised_rho = _mean_rho_vec(
+                calibrated_rho_in, template, y_params,
+                n_cal=n_cal_evaluation, seed=evaluation_seed)
+            deviation = realised_rho - target_rho
+            deviations.append(deviation)
+            rows.append((target_rho, calibrated_rho_in, realised_rho, deviation))
+            if abs(deviation) > HIGH_DEVIATION_THRESHOLD:
+                high_deviation_points.append((target_rho, deviation))
+
+        max_abs_dev = float(np.max(np.abs(deviations)))
+        mean_abs_dev = float(np.mean(np.abs(deviations)))
+        results[label] = {
+            "max_abs_deviation": max_abs_dev,
+            "mean_abs_deviation": mean_abs_dev,
+            "high_deviation_points": high_deviation_points,
+            "table": rows,
+        }
+
+        if verbose:
+            print(f"\n--- {label} ---")
+            print("target_rho  calibrated_rho_in  realised_rho   deviation")
+            for (tr, cr, rr, d) in rows:
+                print(f"  {tr:.2f}       {cr:.4f}           {rr:.4f}      {d:+.4f}")
+            print(f"max_abs_deviation: {max_abs_dev:.4f}")
+            print(f"mean_abs_deviation: {mean_abs_dev:.4f}")
+            if high_deviation_points:
+                print(f"high deviation points (|d| > {HIGH_DEVIATION_THRESHOLD}): "
+                      f"{high_deviation_points}")
+
+    # Assertions (loose safety rails; printed output is primary deliverable)
+    assert results["all_distinct"]["max_abs_deviation"] < 0.012, (
+        "all_distinct control should have near-zero deviation (allow MC noise)")
+    assert results["k=9 even"]["max_abs_deviation"] < 0.025, (
+        "k=9 even: known step discontinuities ~0.02")
+    assert results["k=4 even"]["max_abs_deviation"] < 0.030, (
+        "k=4 even: expected larger steps from fewer, bigger groups")
+
+    return results
 
 
 if __name__ == "__main__":

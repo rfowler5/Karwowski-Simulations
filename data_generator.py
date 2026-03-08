@@ -447,6 +447,14 @@ def _raw_rank_mix(x_ranks, rho_input, y_params, rng, _ln_params=None,
     """
     n = len(x_ranks)
     noise_ranks = rng.permutation(n) + 1.0
+    # Jitter breaks integer commensurability that causes a discrete staircase
+    # in E[Spearman(rho_in)] for heavily tied x (e.g. k=4 equal groups).
+    # |jitter| < 0.5 guarantees adjacent integers can never cross, preserving
+    # the uniform random permutation semantics of noise_ranks.  The jitter
+    # mean is zero so population-constant standardization below remains valid
+    # to within per-sample fluctuations of ~0.49/sqrt(3n) per row (~0.006 for
+    # n=80), which is negligible for calibration accuracy.
+    noise_ranks = noise_ranks + rng.uniform(-0.49, 0.49, size=n)
 
     s_x = x_ranks - np.mean(x_ranks)
     sd_x = np.std(x_ranks, ddof=0)
@@ -523,6 +531,8 @@ def _mean_rho(rho_in, template, y_params, n_cal, seed):
 
         y_vals = cal_rng.lognormal(mean=mu, sigma=sigma, size=nn)
         y_vals.sort()
+        # For continuous y, rank(y_final) = rank(mixed), so these draws are
+        # redundant for calibration. Retained as reference; see _eval_mean_rho_fast.
         y_final = np.empty(nn)
         y_final[np.argsort(mixed)] = y_vals
 
@@ -532,6 +542,12 @@ def _mean_rho(rho_in, template, y_params, n_cal, seed):
 
 def _precompute_calibration_arrays(template, y_params, n_cal, seed):
     """Precompute the rho-independent arrays for nonparametric calibration.
+
+    Retained as reference implementation for validation and for marginals
+    with tied y-values. For lognormal (continuous) y, use
+    _precompute_calibration_arrays_fast, which exploits rank(y_final) =
+    rank(mixed) to skip y generation entirely. See _eval_mean_rho_fast and
+    README § "Skip-y identity for continuous marginals".
 
     Called once per bisection probe; the returned arrays are reused across
     all ~27 bisection iterations, avoiding redundant RNG work and x-ranking.
@@ -568,6 +584,13 @@ def _precompute_calibration_arrays(template, y_params, n_cal, seed):
     else:
         perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
         noise_batch = np.take_along_axis(noise_base, perm, axis=1)
+    # Jitter breaks integer commensurability that causes a discrete staircase
+    # in E[Spearman(rho_in)] for heavily tied x (e.g. k=4 equal groups).
+    # |jitter| < 0.5 guarantees adjacent integers can never cross, preserving
+    # the uniform random permutation semantics.  The jitter mean is zero so
+    # population-constant standardization remains valid; per-row mean
+    # fluctuation is ~0.49/(sqrt(3n)*noise_std) ~ 0.00137 for n=80, negligible.
+    noise_batch = noise_batch + cal_rng.uniform(-0.49, 0.49, size=(n_cal, n))
 
     # Standardize x_ranks per row
     s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
@@ -575,7 +598,8 @@ def _precompute_calibration_arrays(template, y_params, n_cal, seed):
     sd_x = np.where(sd_x > 0, sd_x, 1.0)
     s_x /= sd_x
 
-    # Noise ranks are always permutations of 1..n, so mean/std are constants
+    # Population mean/std for permutations of 1..n remain valid constants
+    # after jitter (jitter mean=0, jitter variance 0.49^2/3 << (n^2-1)/12).
     noise_mean = (n + 1) / 2.0
     noise_std = np.sqrt((n * n - 1) / 12.0)
     s_n = (noise_batch - noise_mean) / noise_std
@@ -584,6 +608,54 @@ def _precompute_calibration_arrays(template, y_params, n_cal, seed):
     y_batch_sorted.sort(axis=1)
 
     return s_x, s_n, y_batch_sorted, x_ranks_batch
+
+
+def _precompute_calibration_arrays_fast(template, n_cal, seed):
+    """Precompute rho-independent arrays for lognormal nonparametric calibration.
+
+    Exploits rank(y_final) = rank(mixed) for continuous (tie-free) y:
+    y_params are not needed and y_batch_sorted is not generated.
+
+    Returns (s_x, s_n, x_ranks_batch) -- note: 3 arrays, not 4.
+    """
+    cal_rng = np.random.default_rng(seed)
+    n = len(template)
+
+    x_batch = np.tile(template, (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        x_batch = cal_rng.permuted(x_batch, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        x_batch = np.take_along_axis(x_batch, perm, axis=1)
+
+    x_ranks_batch = _rank_rows(x_batch)
+
+    noise_base = np.tile(np.arange(1.0, n + 1.0), (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        noise_batch = cal_rng.permuted(noise_base, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        noise_batch = np.take_along_axis(noise_base, perm, axis=1)
+    # Jitter breaks integer commensurability that causes a discrete staircase
+    # in E[Spearman(rho_in)] for heavily tied x (e.g. k=4 equal groups).
+    # |jitter| < 0.5 guarantees adjacent integers can never cross, preserving
+    # the uniform random permutation semantics.  The jitter mean is zero so
+    # population-constant standardization remains valid; per-row mean
+    # fluctuation is ~0.49/(sqrt(3n)*noise_std) ~ 0.00137 for n=80, negligible.
+    noise_batch = noise_batch + cal_rng.uniform(-0.49, 0.49, size=(n_cal, n))
+
+    s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
+    sd_x = x_ranks_batch.std(axis=1, keepdims=True, ddof=0)
+    sd_x = np.where(sd_x > 0, sd_x, 1.0)
+    s_x /= sd_x
+
+    # Population mean/std for permutations of 1..n remain valid constants
+    # after jitter (jitter mean=0, jitter variance 0.49^2/3 << (n^2-1)/12).
+    noise_mean = (n + 1) / 2.0
+    noise_std = np.sqrt((n * n - 1) / 12.0)
+    s_n = (noise_batch - noise_mean) / noise_std
+
+    return s_x, s_n, x_ranks_batch
 
 
 def _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch):
@@ -610,6 +682,19 @@ def _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch):
     return float(np.mean(rhos))
 
 
+def _eval_mean_rho_fast(rho_in, s_x, s_n, x_ranks_batch):
+    """Fast mean Spearman rho exploiting rank(y_final) = rank(mixed).
+
+    Valid when y has no ties (lognormal marginal). Skips argsort,
+    y-assignment, and y-ranking entirely.
+    """
+    rho_c = np.clip(rho_in, -0.999, 0.999)
+    mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n
+    ry = _rank_rows(mixed)
+    rhos = _pearson_on_rank_arrays(x_ranks_batch, ry)
+    return float(np.mean(rhos))
+
+
 def _mean_rho_vec(rho_in, template, y_params, n_cal, seed):
     """Vectorized mean realised Spearman rho: replaces the n_cal Python loop
     with a single batch of matrix operations.
@@ -620,34 +705,35 @@ def _mean_rho_vec(rho_in, template, y_params, n_cal, seed):
     Random sequence differs from _mean_rho for the same seed (batch vs
     sequential generation) but the expectation and variance are the same.
 
-    Convenience wrapper around _precompute_calibration_arrays + _eval_mean_rho.
+    Convenience wrapper around _precompute_calibration_arrays_fast +
+    _eval_mean_rho_fast (skip-y path for lognormal).
     """
-    s_x, s_n, y_batch_sorted, x_ranks_batch = _precompute_calibration_arrays(
-        template, y_params, n_cal, seed)
-    return _eval_mean_rho(rho_in, s_x, s_n, y_batch_sorted, x_ranks_batch)
+    s_x, s_n, x_ranks_batch = _precompute_calibration_arrays_fast(
+        template, n_cal, seed)
+    return _eval_mean_rho_fast(rho_in, s_x, s_n, x_ranks_batch)
 
 
 def _bisect_for_probe(probe, template, y_params, n_cal, seed,
                       n_iter=25, tol=5e-5):
     """Bisect to find rho_in such that _mean_rho(rho_in, ...) ≈ probe.
 
-    Precomputes rho-independent arrays once, then calls _eval_mean_rho for
-    each bisection step (~27×), avoiding redundant RNG and x-ranking work.
+    Precomputes rho-independent arrays once (fast path: no y), then calls
+    _eval_mean_rho_fast for each bisection step (~27×).
     Returns rho_in (float) or None if the probe is unreachable.
     """
-    arrays = _precompute_calibration_arrays(template, y_params, n_cal, seed)
+    arrays = _precompute_calibration_arrays_fast(template, n_cal, seed)
 
     lo, hi = 0.0, min(probe * 2.0, 0.999)
-    val_hi = _eval_mean_rho(hi, *arrays)
+    val_hi = _eval_mean_rho_fast(hi, *arrays)
     if val_hi < probe:
         hi = 0.999
-        val_hi = _eval_mean_rho(hi, *arrays)
+        val_hi = _eval_mean_rho_fast(hi, *arrays)
     if val_hi < probe:
         return None  # unreachable
 
     for _ in range(n_iter):
         mid = (lo + hi) / 2.0
-        observed = _eval_mean_rho(mid, *arrays)
+        observed = _eval_mean_rho_fast(mid, *arrays)
         if observed < probe:
             lo = mid
         else:
@@ -655,13 +741,41 @@ def _bisect_for_probe(probe, template, y_params, n_cal, seed,
         if hi - lo < tol:
             break
 
-    # For highly-tied x distributions, _eval_mean_rho has structural step
-    # discontinuities (f jumps sharply at a rho_in threshold).  The
-    # bisection converges to that jump but lo and hi sit on opposite sides,
-    # so (lo+hi)/2 can land on the wrong plateau and be far from the probe.
-    # Pick whichever endpoint evaluates closer to the target.
-    val_lo = _eval_mean_rho(lo, *arrays)
-    val_hi = _eval_mean_rho(hi, *arrays)
+    # Return the endpoint whose evaluated mean_rho is closer to the probe,
+    # rather than the midpoint (lo+hi)/2.  Reason: for highly-tied x
+    # distributions, _eval_mean_rho has structural step discontinuities.
+    #
+    # (a) Cause: Inside _eval_mean_rho we compute mixed = rho_c*s_x + sqrt(1-
+    #     rho_c^2)*s_n and assign y via argsort(mixed).  With heavily tied x,
+    #     s_x has repeated values; a tiny change in rho_c can flip the
+    #     ordering of mixed at tied positions, so rank assignments jump
+    #     discretely and mean Spearman rho jumps (e.g. from ~0.28 to ~0.30).
+    #     This is not Monte Carlo noise — it persists with n_cal=20,000.
+    #
+    # (b) Why (lo+hi)/2 was wrong: Bisection converges to the jump, so lo and
+    #     hi sit on opposite sides (e.g. f(lo)=0.280, f(hi)=0.301 for
+    #     probe=0.30).  The midpoint (lo+hi)/2 can lie on the low plateau and
+    #     evaluate to f(mid)=0.280.  Returning that rho_in then caused
+    #     simulations to yield mean_rho≈0.280 instead of the target 0.30.
+    #
+    # (c) For piecewise-constant (step) functions, the only achievable values
+    #     are the plateaus.  The rho_in we want is one that gives realised
+    #     mean_rho closest to the probe — i.e. whichever of lo or hi has
+    #     f(.) closer to the probe.  For continuous calibration (low ties),
+    #     lo ≈ hi at convergence so the choice is irrelevant.
+    #
+    # (d) When |val_hi - probe| == |val_lo - probe| we return hi (<= in the
+    #     condition below).  Intentional: the bisection invariant guarantees
+    #     f(hi) >= probe at every iteration, so hi is the endpoint we have a
+    #     proof about and is the natural default when the two endpoints cannot
+    #     be distinguished by distance alone. Note on bias direction: preferring
+    #     hi means accepting slight overestimation of the probe (f(hi) >= probe).
+    #     For power analysis, overestimating the calibrated rho is the 
+    #     anti-conservative direction (simulated correlation slightly above 
+    #     target, power slightly inflated). The effect is negligible in the
+    #     tiebreaker case but worth noting for auditing purposes.
+    val_lo = _eval_mean_rho_fast(lo, *arrays)
+    val_hi = _eval_mean_rho_fast(hi, *arrays)
     return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
 
 
@@ -681,13 +795,18 @@ def _interp_with_extrapolation(x, xp, fp):
 
 
 _CALIBRATION_CACHE_MULTIPOINT = {}
-_MULTIPOINT_PROBES = [0.10, 0.30, 0.50]
+# 5 probes at gap 0.10 give max interpolation error < 0.0004 in [0.25, 0.42]
+# (the bisection search range).  3 probes at gap 0.20 produced up to 0.0022
+# error in that range due to curvature of the calibration curve at higher rho.
+_MULTIPOINT_PROBES = [0.10, 0.20, 0.30, 0.40, 0.50]
 
 
 def _calibrate_rho_multipoint(n, n_distinct, distribution_type, rho_target,
                                y_params, all_distinct=False, n_cal=300,
                                seed=99, freq_dict=None):
     """Multi-point calibration: probe at 3 rho values, interpolate."""
+    # Cache key excludes y_params: rank(mixed) = rank(y_final) for continuous y,
+    # so the calibration curve depends only on (n, template, seed, n_cal).
     cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal,
                  "multipoint")
     if freq_dict is not None:
@@ -818,7 +937,12 @@ def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
             if hi - lo < 5e-5:
                 break
 
-        calibrated_probe = (lo + hi) / 2.0
+        # Return the endpoint whose _mean_rho is closer to the probe
+        # (same fix as _bisect_for_probe: avoids midpoint landing on
+        # wrong plateau when step discontinuities are present).
+        val_lo = _mean_rho(lo)
+        val_hi = _mean_rho(hi)
+        calibrated_probe = hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
         ratio = calibrated_probe / probe if probe > 0 else 1.0
         _CALIBRATION_CACHE[cache_key] = ratio
 
@@ -888,7 +1012,12 @@ def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
             if hi - lo < 5e-5:
                 break
 
-        calibrated_probe = (lo + hi) / 2.0
+        # Return the endpoint whose _mean_rho is closer to probe.
+        # Copula steps are expected to be small, but this makes the
+        # pattern consistent across all calibration bisections.
+        val_lo = _mean_rho(lo)
+        val_hi = _mean_rho(hi)
+        calibrated_probe = hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
         ratio = calibrated_probe / probe if probe > 0 else 1.0
         _CALIBRATION_CACHE_COPULA[cache_key] = ratio
 
@@ -1033,6 +1162,10 @@ def _bisect_for_probe_empirical(probe, template, pool, n_cal, seed,
         if hi - lo < tol:
             break
 
+    # Same as _bisect_for_probe: return the endpoint closer to the probe (not
+    # the midpoint) because _eval_mean_rho has step discontinuities with
+    # heavily-tied x (argsort(mixed) flips at rho_c thresholds).  Prefer hi
+    # when equidistant (f(hi) >= probe by invariant).
     val_lo = _eval_mean_rho(lo, *arrays)
     val_hi = _eval_mean_rho(hi, *arrays)
     return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
@@ -1124,7 +1257,10 @@ def calibrate_rho_empirical(n, n_distinct, distribution_type, rho_target, pool,
             if hi - lo < 5e-5:
                 break
 
-        calibrated_probe = (lo + hi) / 2.0
+        # Return the endpoint whose _mean_rho_empirical is closer to probe.
+        val_lo = _mean_rho_empirical(lo, template, pool, n_cal, seed)
+        val_hi = _mean_rho_empirical(hi, template, pool, n_cal, seed)
+        calibrated_probe = hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
         ratio = calibrated_probe / probe if probe > 0 else 1.0
         _CALIBRATION_CACHE_EMP[cache_key] = ratio
 
@@ -1286,6 +1422,13 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
     else:
         perm = np.argsort(rng.random((n_sims, n)), axis=1)
         noise_ranks = np.take_along_axis(noise_base, perm, axis=1)
+    # Jitter breaks integer commensurability that causes a discrete staircase
+    # in E[Spearman(rho_in)] for heavily tied x (e.g. k=4 equal groups).
+    # |jitter| < 0.5 guarantees adjacent integers can never cross, preserving
+    # the uniform random permutation semantics.  Must match the jitter applied
+    # in the calibration precompute functions so that calibrated rho_in values
+    # produce the correct E[Spearman] in data generation.
+    noise_ranks = noise_ranks + rng.uniform(-0.49, 0.49, size=(n_sims, n))
 
     # Standardize x_ranks per row
     s_x = x_ranks_batch - x_ranks_batch.mean(axis=1, keepdims=True)
@@ -1293,7 +1436,8 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
     sd_x = np.where(sd_x > 0, sd_x, 1.0)   # avoid divide-by-zero (matches 1D guard)
     s_x /= sd_x
 
-    # Noise ranks are always permutations of 1..n, so mean and std are constants
+    # Population mean/std for permutations of 1..n remain valid constants
+    # after jitter (jitter mean=0, jitter variance 0.49^2/3 << (n^2-1)/12).
     noise_mean = (n + 1) / 2.0
     noise_std = np.sqrt((n * n - 1) / 12.0)
     s_n = (noise_ranks - noise_mean) / noise_std

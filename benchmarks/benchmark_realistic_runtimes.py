@@ -5,6 +5,10 @@ then scale to +/-0.01, +/-0.002, +/-0.001 accuracy tiers.
 Run one at a time per benchmarking rule. Use --quick for single-scenario only,
 --skip-parallel to skip parallel (n_jobs=-1) runs.
 
+Note: The empirical generator uses the precomputed null by default
+(config.EMPIRICAL_USE_PRECOMPUTED_NULL=True), so its p-value step is expected
+~60× faster than per-dataset MC; timings reflect this.
+
 Usage:
   python benchmarks/benchmark_realistic_runtimes.py [--quick] [--skip-parallel] [--generators ...] [--debug-cache-warmup]
   Use --debug-cache-warmup to time null + calibration cache warmup; then grid runs use hot caches (simulation-only cost).

@@ -308,7 +308,13 @@ EMPIRICAL_USE_PRECOMPUTED_NULL = True
 # Benchmark precision tiers (power and CI)
 # Used by benchmarks/estimate_runtime_model.py, benchmarks/benchmark_realistic_runtimes.py,
 # and benchmarks/benchmark_precision_params.py.
-# TIERS: target half-widths (95% CI) and labels; (n_sims, n_cal) for power; (n_reps, n_boot) for CI.
+# TIERS: target half-widths (95% CI) and labels.
+# POWER_TIERS: (n_sims, n_cal) -- balances bisection and calibration noise equally.
+# CI_TIERS: (n_reps, n_boot, n_cal) -- balances inter-rep noise and calibration noise
+#   equally; bootstrap quantile noise is negligible (~5.4% of inter-rep SE at all tiers).
+#   n_cal here controls CI endpoint accuracy (absolute values); it does not affect CI width.
+#   With n_cal = 300 (config default), calibration noise alone exceeds the ±0.01 target.
+# See docs/UNCERTAINTY_BUDGET.md for the full error budget and derivations.
 # ---------------------------------------------------------------------------
 TIERS = [
     (0.01, "+/-0.01"),
@@ -321,7 +327,7 @@ POWER_TIERS = [
     (222050, 96400),   # +/-0.001  (C_BISECTION = 0.17, C_CAL = 0.112)
 ]
 CI_TIERS = [
-    (650, 500),        # +/-0.01   (SD_INTER_REP = 0.13)
-    (16240, 500),      # +/-0.002  (SD_INTER_REP = 0.13)
-    (64930, 500),      # +/-0.001  (SD_INTER_REP = 0.13)
+    (1300, 500, 1000),       # +/-0.01   (SD_INTER_REP = 0.13, C_CAL = 0.112)
+    (32500, 500, 24100),     # +/-0.002  (SD_INTER_REP = 0.13, C_CAL = 0.112)
+    (129700, 500, 96400),    # +/-0.001  (SD_INTER_REP = 0.13, C_CAL = 0.112)
 ]

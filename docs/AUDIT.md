@@ -70,6 +70,86 @@ should treat these as ground truth and not flag them as suspicious.
 
 ---
 
+## Audited Design Decision — Bonett-Wright 1.06 Excluded from Noncentrality Parameter
+
+**File:** `power_asymptotic.py`, `asymptotic_power()`
+**Decision:** The noncentrality parameter uses nc = ρ√(n−2)/√(1−ρ²) with
+FHP tie correction only. A previous version also multiplied nc by √(1/1.06);
+this was removed.
+
+**The theoretical argument for including it:**
+
+The nc formula is exact for Pearson r under bivariate normality but is an
+approximation for Spearman r_S. The asymptotic relative efficiency (ARE) of
+Spearman vs Pearson under bivariate normality is 9/π² ≈ 0.912, meaning
+Var(r_S) ≈ (π²/9) × Var(r_P) ≈ 1.097 × Var(r_P). Since r_S has higher
+variance, the non-central t model with the Pearson-derived nc slightly
+overestimates the signal-to-noise ratio, suggesting a deflation of nc by
+√(9/π²) ≈ 0.955. The Bonett-Wright practical approximation uses 1.06 instead
+of 1.097, giving √(1/1.06) ≈ 0.971.
+
+**Why it is excluded (five reasons):**
+
+1. **Literature consensus.** Standard power-analysis references (Cohen 1988,
+   GPower documentation, Fieller-Hartley-Pearson 1957) all use
+   nc = ρ√(n−2)/√(1−ρ²) for Spearman without any efficiency deflation. No
+   published source applies the Bonett-Wright factor (or π²/9) to the
+   noncentrality parameter.
+
+2. **Cross-framework contamination.** The 1.06 factor was derived by Bonett &
+   Wright (2000) for Var(arctanh(r_S)) in Fisher z-space, used for confidence
+   intervals. The nc parameter belongs to the non-central t framework, a
+   separate inferential approach. Transferring a variance correction between
+   these frameworks requires its own derivation, which does not exist in the
+   literature.
+
+3. **Wrong constant.** Even if a deflation were justified, √(1/1.06) ≈ 0.971
+   is the wrong value. The theoretical ARE gives √(9/π²) ≈ 0.955. The 1.06 is Bonett-Wright's practical simplification of π²/9 ≈ 1.097 for CI purposes.
+   Using it in the nc parameter compounds an approximation designed for a
+   different formula.
+   
+   Moreover, it is not a rounding of π²/9 ≈ 1.097 — it is a simulation-calibrated value. The 1.06 was calibrated for CI coverage, not derived from a general variance formula. Bonett & Wright found 1.06 gives closer-to-nominal 95% coverage; it falls between the two failure modes:
+
+   | Constant      | Source                              | Behavior                                    |
+   |---------------|-------------------------------------|---------------------------------------------|
+   | 1.0           | Pearson formula, ignoring loss      | CIs too narrow (liberal)                    |
+   | 1.06          | Bonett-Wright simulation-calibrated | ~Nominal coverage across practical n        |
+   | π²/9 ≈ 1.097  | Pure asymptotic ARE                 | CIs slightly too wide (conservative)        |
+
+   As can be seen then, the 1.06 is a distinct empirical finding, not a rounded theoretical constant: it falls between 1.0 and 1.097, pulled below the asymptotic value by finite-sample corrections. Using it in the nc parameter compounds an approximation designed for a different formula. Likewise, using the full 1.0966 would overstate the variance of arctanh(r_S) at realistic, practical sample sizes, producing CIs that are slightly too wide (conservative).
+   
+   Transplanting a simulation-tuned CI constant into a non-central t
+   noncentrality parameter is even less justified than transplanting the
+   theoretical π²/9 would be.
+
+4. **Population-specific ARE.** The 9/π² result holds only for bivariate
+   normal continuous data. For discrete data with ties (as in this study),
+   the ARE is different and generally unknown. Applying a bivariate-normal
+   constant to a discrete-data power calculation is of questionable validity.
+
+5. **Self-correcting approximation.** The non-central t(df=n−2, nc)
+   approximation has multiple sources of error for Spearman (rank discreteness,
+   non-exact distributional match). These partially cancel in practice.
+   Simulation studies confirm the uncorrected formula gives adequate power
+   estimates. Applying one deflation factor without addressing other
+   approximation errors of comparable magnitude may worsen rather than improve
+   overall accuracy.
+
+**Relationship to FHP tie correction:** The FHP correction
+nc × √(var_no_ties / var_ties) addresses a different phenomenon: additional
+variance from tied ranks reducing effective information. FHP compares
+tied-Spearman to untied-Spearman; Bonett-Wright compares Spearman to Pearson.
+These are orthogonal axes. The presence of ties does not create a need for the
+1.06 factor; ties are fully handled by FHP.
+
+**Magnitude of the excluded effect:** The deflation would reduce nc by ~3%
+(using 1.06) or ~4.5% (using π²/9). For the study parameters (n=73–82,
+ρ ≈ 0.30), this would reduce asymptotic power by approximately 0.5–1.0
+percentage points — within the inherent approximation error of the non-central
+t method for Spearman correlation.
+
+---
+
 ## Known Approximations — Intentional, Not Bugs
 
 **`_fit_lognormal` symmetric IQR split**
@@ -176,23 +256,24 @@ when the empirical branch already called `np.sort(pool, axis=1)` at line 996.
 
 ## Missing Tests
 
-### TEST-1 — Boundary warning fires
-**Test file:** `tests/test_power_sanity.py` or new `test_bisection_bounds.py`
-**What to test:** Call `min_detectable_rho` with parameters engineered to
-push the answer near 0.42 (e.g., very small n or very high target power).
-Assert that `warnings.warn` was emitted. Use `pytest.warns(UserWarning)`.
-**Why:** Ensures FIX-1 actually fires; prevents regression where the warning
-is accidentally removed.
+### TEST-1 — Boundary warning fires [DONE]
+**Test file:** `tests/test_boundary_warning.py`
+**What to test:** The boundary check is extracted into `_check_and_warn_boundary`
+in `power_simulation.py`. Test calls the helper directly with deterministic
+inputs near lo_bound, hi_bound, safely inside, and at the exact tolerance edge.
+Uses `warnings.catch_warnings(record=True)`. No MC simulation needed.
+**Why:** Ensures FIX-1 actually fires; prevents regression. Deterministic and
+runs in < 1 ms.
 
-### TEST-2 — `spearman_var_h0` monotonicity
+### TEST-2 — `spearman_var_h0` monotonicity [DONE]
 **Test file:** `tests/test_asymptotic_formulas.py`
 **What to test:** For any tie structure, `spearman_var_h0(n, x_counts)` with
 ties should be ≥ `spearman_var_h0(n, None)` (no ties). Ties inflate variance.
 **Why:** A sign error in the FHP formula would flip this relationship and
 produce optimistic (anticonservative) CIs.
 
-### TEST-3 — Negative rho calibration symmetry
-**Test file:** `tests/test_calibration_accuracy.py`
+### TEST-3 — Negative rho calibration symmetry [DONE]
+**Test file:** `tests/test_calibration_symmetry.py`
 **What to test:**
 ```python
 pos = calibrate_rho(n, k, dt, +0.30, y_params)
@@ -200,10 +281,10 @@ neg = calibrate_rho(n, k, dt, -0.30, y_params)
 assert abs(pos + neg) < 1e-6   # should be exactly negatives of each other
 ```
 **Why:** The calibration uses only positive probes and applies sign afterward.
-If the sign logic has a bug, this test catches it. Currently not tested.
+If the sign logic has a bug, this test catches it.
 
-### TEST-4 — `_fit_lognormal` median recovery
-**Test file:** `tests/` (new `test_data_generator.py` or add to existing)
+### TEST-4 — `_fit_lognormal` median recovery [DONE]
+**Test file:** `tests/test_data_generator.py`
 **What to test:**
 ```python
 mu, sigma = _fit_lognormal(median=2.5, iqr=1.2)
@@ -212,20 +293,19 @@ assert sigma > 0
 ```
 **Why:** Verifies the basic contract of the function. Simple regression guard.
 
-### TEST-5 — `_interp_with_extrapolation` edge cases
-**Test file:** new `test_data_generator.py`
+### TEST-5 — `_interp_with_extrapolation` edge cases [DONE]
+**Test file:** `tests/test_data_generator.py`
 **What to test:** Three cases:
 1. `x < xp[0]` (below first probe): result should follow slope from first two points
 2. `x > xp[-1]` (above last probe): result should follow slope from last two points
 3. `len(xp) == 1` (single point): should return `fp[0]` without IndexError
 **Why:** The multipoint calibration falls back to extrapolation for rho
-targets outside [0.10, 0.50]. Currently not unit-tested.
+targets outside [0.10, 0.50].
 
-### TEST-6 — Asymptotic formulas across all four cases
+### TEST-6 — Asymptotic formulas across all four cases [DONE]
 **Test file:** `tests/test_asymptotic_formulas.py`
-**What to test:** The existing test only runs Case 3. Parameterize with
-`@pytest.mark.parametrize` over all four case IDs and verify CI contains
-observed rho, CI width > 0, and CI is within [-1, 1] for each.
+**What to test:** Run all four case IDs (via `test_all_four_cases()` loop; no pytest)
+and verify for each: CI contains observed rho, CI width > 0, and CI is within [-1, 1].
 **Why:** Cases 1, 2, 4 have different n and observed rho; edge cases in
 the FHP correction could manifest differently.
 
@@ -337,6 +417,77 @@ all generators, not specific to the empirical generator or OPT-1.
 
 **Future work:** See `.cursor/plans/auto_select_n_pre_precision_tier.plan.md`
 for the idea of auto-selecting n_pre based on the precision tier being run.
+
+**See also:** [UNCERTAINTY_BUDGET.md](UNCERTAINTY_BUDGET.md) for the consolidated
+error budget placing PREC-1 alongside all other power and CI error sources, with
+a single quick-reference parameter table for each precision tier.
+
+---
+
+### PREC-2 — Discrete noise staircase limits calibration accuracy for k=4 even (RESOLVED)
+
+**Affects:** Nonparametric and empirical generators with heavily tied x (small
+k, equal group sizes), prior to the jitter fix.
+
+**Mechanism:** The rank-mixing formula `mixed = rho * s_x + sqrt(1-rho^2) * s_n`
+uses noise drawn as a permutation of integers {1,...,n}. For k=4 equal groups
+(n=80, groups of 20), s_x takes only 4 distinct values with equal spacing
+Delta = 20/sqrt((n^2-1)/3) ≈ 0.894. A pair of observations from groups i and j
+swaps order in `mixed` when rho crosses a threshold determined by their noise
+difference. Because noise values are integers, these thresholds land at a
+discrete set of rho values. For equally-spaced, equal-sized groups the
+thresholds for all group-pair separations (j=1,2,3) coincide at common values:
+
+    rho_m = m / sqrt(m^2 + (n/k * sqrt(k^2-1)/sqrt(3))^2)
+
+For m=3 (the dominant resonance): rho_3 ≈ **0.14374**, confirmed experimentally
+(step observed at exactly this value on a grid of spacing 7.5e-6 at n_cal=500k).
+
+At each resonance point, swaps from all group-pair separations pile up
+simultaneously, causing a step in E[Spearman(rho_in)] of:
+
+    Delta_F ≈ (n/k)^2 * k*(k-1)/2 * (1/n^2) * (average group gap) / denominator
+             ≈ 0.023 for k=4, n=80 (confirmed: observed step = 0.0227)
+
+This step cannot be reduced by increasing n_cal (both seeds show the jump at
+the same rho_in to within 7.5e-6). The calibration accuracy was capped at
+~±0.011 (half a step) regardless of n_cal.
+
+**Fix:** Add Uniform(-0.49, 0.49) jitter to the noise permutation in all four
+noise-generating code paths (three in `data_generator.py`; matching jitter in
+the test helper `_precompute_calibration_arrays_fast_jittered`):
+
+- `_raw_rank_mix` (single-sample data generation)
+- `_raw_rank_mix_batch` (batch data generation)
+- `_precompute_calibration_arrays` (slow calibration path)
+- `_precompute_calibration_arrays_fast` (fast calibration path)
+
+The jitter breaks integer commensurability. Since |jitter| < 0.5, adjacent
+integer noise values never cross, so the uniform random permutation semantics
+are preserved exactly (rank order within each row is unchanged). The jitter
+mean is zero, so population-constant standardization remains valid with
+per-row mean fluctuation ~0.49/(sqrt(3n)*noise_std) ~ 0.00137 (1 SD, n=80)
+— negligible for calibration.
+
+**Jitter does not attenuate correlation** because it perturbs the noise term
+s_n (the error), not the signal s_x (x-ranks). This is structurally different
+from the copula jitter (which attenuated by perturbing s_x), analogous to
+adding measurement error to epsilon vs to x in a regression.
+
+**Also required:** Expand `_MULTIPOINT_PROBES` from 3 to 5 points. With 3
+probes at gap 0.20, piecewise-linear interpolation error reached 0.0022 in
+[0.25, 0.42] (the bisection search range) due to curvature of F(rho_in) at
+higher rho. With 5 probes at gap 0.10 the max interpolation error in the
+operating range dropped to < 0.0004. (Beyond the probe range, extrapolation
+grows larger, but the bisection search never targets rho outside [0.25, 0.42].)
+
+**Calibration accuracy after fix** (k=4 even, n=80, n_cal=100k):
+- Bisection: max |deviation| = 0.00010
+- Multipoint (5 probes): max |deviation| in [0.25, 0.42] = 0.00035
+
+Both are well within the ±0.001 tier.
+
+**Status:** Resolved. Jitter and 5-probe expansion deployed to production.
 
 ---
 

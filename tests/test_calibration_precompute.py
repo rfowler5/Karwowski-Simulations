@@ -189,13 +189,22 @@ def test_precompute_s_x_zero_mean():
 
 
 def test_precompute_s_n_zero_mean():
-    """s_n rows have mean 0 and std 1 (standardized noise ranks)."""
+    """s_n rows have near-zero mean and std ~1 (standardized noise ranks with jitter).
+
+    With pure integer permutation noise the mean was exactly 0 and std exactly
+    1 per row (atol=1e-10 was valid).  With Uniform(-0.49, 0.49) jitter the
+    per-row sample mean fluctuates by ~0.49/(sqrt(3n)*noise_std) ~ 0.00137 for
+    n=80 (1-SD); over n_cal=300 rows the expected max is ~3.5 SD ~ 0.005.
+    atol=0.02 is ~15 SD — impossible to exceed unless standardization is wrong.
+    Similarly, jitter adds variance 0.49^2/3 / ((n^2-1)/12) ~ 0.015% to each
+    row std; atol=0.01 catches any real bug while accommodating this effect.
+    """
     _, s_n, _, _ = _arrays()
     row_means = s_n.mean(axis=1)
     row_stds = s_n.std(axis=1, ddof=0)
-    assert np.allclose(row_means, 0.0, atol=1e-10), (
+    assert np.allclose(row_means, 0.0, atol=0.02), (
         f"s_n row means not ~0: max |mean| = {np.abs(row_means).max():.2e}")
-    assert np.allclose(row_stds, 1.0, atol=1e-10), (
+    assert np.allclose(row_stds, 1.0, atol=0.01), (
         f"s_n row stds not ~1: max |std-1| = {np.abs(row_stds - 1).max():.2e}")
     print("PASS: test_precompute_s_n_zero_mean")
 
@@ -369,7 +378,7 @@ if __name__ == "__main__":
         try:
             test_fn()
         except Exception as exc:
-            print(f"FAIL: {test_fn.__name__}  → {exc}")
+            print(f"FAIL: {test_fn.__name__} -> {exc}")
             failed.append(test_fn.__name__)
 
     print()

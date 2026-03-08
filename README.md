@@ -103,6 +103,52 @@ All rank-based simulation methods (including full Iman-Conover) face similar att
 
 **Why this method?** Unlike the Gaussian copula, it does not rely on the continuous-marginals assumption. Unlike the linear model, it does not assume a parametric relationship between x and y. It handles tied x-values naturally because the mixing operates directly in rank space.
 
+#### Skip-y identity for continuous marginals
+
+The rank-mixing step assigns y-values by sorting $`n`$ draws $`y_{(1)} < y_{(2)} < \cdots < y_{(n)}`$ and scattering them onto positions determined by `argsort(mixed)`:
+
+```
+y_final[argsort(mixed)[k]] = y_{(k+1)}
+```
+
+**Claim.** When all y draws are distinct, the orderings of `mixed` and `y_final` are identical:
+
+```math
+\mathrm{mixed}[j_1] < \mathrm{mixed}[j_2] \iff y_{\mathrm{final}}[j_1] < y_{\mathrm{final}}[j_2]
+```
+
+**Proof.** Let position $`j`$ receive rank $`k_j`$ in `mixed` (i.e. $`j`$ is the $`k_j`$-th smallest element of `mixed`). The scatter assignment gives $`y_{\mathrm{final}}[j] = y_{(k_j)}`$. For any two positions $`j_1, j_2`$:
+
+- $`\mathrm{mixed}[j_1] < \mathrm{mixed}[j_2] \iff k_{j_1} < k_{j_2}`$ (by definition of rank)
+- $`k_{j_1} < k_{j_2} \iff y_{(k_{j_1})} < y_{(k_{j_2})}`$ (since sorted y is strictly increasing)
+- Therefore $`\mathrm{mixed}[j_1] < \mathrm{mixed}[j_2] \iff y_{\mathrm{final}}[j_1] < y_{\mathrm{final}}[j_2]`$. $`\square`$
+
+Since `mixed` is almost surely tie-free (see below), both vectors have identical orderings with no ties, so their rank vectors are equal element-wise:
+
+```math
+\mathrm{rank}(y_{\mathrm{final}}) = \mathrm{rank}(\mathrm{mixed})
+```
+
+**Consequence for Spearman correlation.** Spearman's $`\rho_s`$ is the Pearson correlation of the rank vectors. Substituting the identity:
+
+```math
+\rho_s(x,\, y_{\mathrm{final}}) = \mathrm{Pearson}\!\left(\mathrm{rank}(x),\; \mathrm{rank}(y_{\mathrm{final}})\right) = \mathrm{Pearson}\!\left(\mathrm{rank}(x),\; \mathrm{rank}(\mathrm{mixed})\right)
+```
+
+The right-hand side depends only on the x-template, the noise permutations, and $`\rho_c`$ — **not** on the y marginal parameters (median, IQR, etc.). Therefore, calibration precompute can skip lognormal y generation entirely, replacing the four-step sequence (argsort → scatter y → rank y_final → Pearson-on-ranks) with a single `rank(mixed)`. This is implemented in `_eval_mean_rho_fast` and `_precompute_calibration_arrays_fast`.
+
+**Tie probability for lognormal y.** For $`n = 80`$ float64 lognormal draws, the probability of any two values being exactly equal is
+
+```math
+\binom{80}{2} \cdot 2^{-53} \approx 3.5 \times 10^{-13}
+```
+
+so the identity holds for all practical purposes.
+
+**Why mixed is almost surely tie-free.** Even when $`s_x`$ has repeated values (from tied x), the noise component $`s_n`$ is a permutation of distinct values $`1, \ldots, n`$. For $`|\rho_c| < 1`$, the noise term $`\sqrt{1-\rho_c^2}\, s_n`$ breaks all ties: two positions $`j_1 \neq j_2`$ share a mixed value only if $`\rho_c(s_x[j_1]-s_x[j_2]) = \sqrt{1-\rho_c^2}(s_n[j_2]-s_n[j_1])`$, an exact rational equation that float64 arithmetic satisfies with probability zero.
+
+**Tied y (empirical marginal).** When the y pool has ties (e.g. from digitization precision in the Karwowski data), the identity breaks: tied y-values at adjacent sorted positions receive averaged ranks that differ from `rank(mixed)`. The empirical generator calibration path handles this separately and does not use the skip-y optimization.
+
 ### Gaussian copula
 
 Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for Y. Target Spearman rho is converted to Pearson correlation for sampling; then draws from a conditional bivariate normal; Y-values are mapped through the inverse CDF of the fitted log-normal.
@@ -149,7 +195,7 @@ For p-value and calibration decisions (new y per sim, single reference pool, per
 - **Pool and y per sim/rep:** The empirical generator uses a **pool** of y-values (e.g. 71 digitized + 2 or 10 “fill” for n=73 or 81; or 71 fixed + remainder resampled per sim if the “fixed 71” design is applied). Each n_sim or n_rep produces a **new** y dataset: either by resampling **n** values from the pool with replacement (current), or by using exactly the 71 digitized values plus a new random draw for the remainder (fixed-71 design). We do **not** reuse the same y across sims; we intentionally generate new y-data each sim/rep.
 - **Why new y each time is correct:** We are averaging over many (x, y) realizations. The pool (or the 71) is fixed; the **draws** from it (or the remainder) are random. So power and CI estimates average over the randomness in y, giving unbiased expectations and valid assessment of variability. This is the same principle as other generators (nonparametric, copula, linear), where y is newly generated every sim; here the “population” is the finite pool (or 71 + random remainder) instead of a parametric distribution.
 - **Calibration:** Calibration for empirical runs **once per scenario** (cached by n, n_distinct, distribution_type, etc.). It uses a **single reference pool** from `get_pool(n)` (fixed seed), not the per-sim pool. So the same `cal_rho` is used for all n_sims/n_reps in that scenario. Any small mismatch between that reference pool’s tie structure and a given sim’s pool (e.g. different 2 or 10 fill values) is **averaged over** by the randomness of the different y-data across sims: over many n_sims we average over (a) different x, (b) different y-pools/realizations, and (c) rank-mix assignment. The Monte Carlo mean remains close to the target; per-rep variation contributes to the variance we are estimating. So one reference pool and one `cal_rho` per scenario is a reasonable and consistent setup.
-- **P-value:** By default (`EMPIRICAL_USE_PRECOMPUTED_NULL = True`), the empirical generator uses the **same precomputed null** as other generators (keyed on x tie structure, built from all-distinct y-ranks 1..n). Although empirical y can have **ties** from the finite pool, the approximation error is negligible (< 1.4 × 10⁻⁵ on p-values; see [Precomputed null approximation](#precomputed-null-approximation-for-empirical-generator)). Set `EMPIRICAL_USE_PRECOMPUTED_NULL = False` to revert to **per-dataset Monte Carlo permutation** (exact, much slower). The MC path uses adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba.
+- **P-value:** By default (`EMPIRICAL_USE_PRECOMPUTED_NULL = True`), the empirical generator uses the **same precomputed null** as other generators (keyed on x tie structure, built from all-distinct y-ranks 1..n). Empirical y **always** has ties: the pool is 71 digitized values with repeated measurements, resampled into n = 73–81, so by pigeonhole and pre-existing duplicates, tied y is guaranteed in every realization. The approximation error is nevertheless negligible (< 1.4 × 10⁻⁵ on p-values; see [Precomputed null approximation](#precomputed-null-approximation-for-empirical-generator)). Set `EMPIRICAL_USE_PRECOMPUTED_NULL = False` to revert to **per-dataset Monte Carlo permutation** (exact, much slower). The MC path uses adaptive n_perm (1k when n_sims ≥ 5000, else 2k), batched over all (sim, perm) pairs via Numba.
 
 **Why this is legitimate:**
 
@@ -480,7 +526,13 @@ where $`\rho`$ is the Spearman rho at the calibration probe (default 0.30). For 
 
 ### Why Bonett-Wright SE (1.06 factor)?
 
-The standard Fisher z-transform SE for Pearson r is $`\sqrt{1/(n-3)}`$. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = $`\sqrt{1.06/(n-3)}`$. The theoretical asymptotic variance factor for Spearman rho (no ties) is $`\pi^2/9 \approx 1.0966`$; Bonett & Wright (2000) recommended the simpler 1.06 approximation (~6% efficiency loss), which is commonly used in practice. For the CI equation, see [Statistical methods](#statistical-methods). Note: a previous version also applied $`\sqrt{1/1.06}`$ to the asymptotic power noncentrality parameter; this was an AI-generated fudge factor not supported by the literature and has been removed.
+The standard Fisher z-transform SE for Pearson r is $`\sqrt{1/(n-3)}`$. For Spearman rho, Bonett and Wright (2000) showed that the variance is approximately 6% larger, giving SE = $`\sqrt{1.06/(n-3)}`$. The theoretical constant is $`\pi^2/9 \approx 1.0966`$, the reciprocal of the asymptotic relative efficiency (ARE = 9/π²) of Spearman vs Pearson under bivariate normality. Bonett & Wright used **1.06** instead. This is not a rounding of 1.0966 but a **simulation-calibrated** value that accounts for finite-sample corrections. At practical sample sizes, higher-order terms 
+partially offset the asymptotic efficiency loss, so the effective variance 
+inflation is smaller than π²/9. Using the full 1.0966 would produce 
+slightly conservative (too-wide) CIs, overstating the variance; 1.06 was chosen to achieve closer-to-nominal 95% coverage across a range of n and ρ values. The 1.06 is a compromise value: it falls between the Pearson formula (constant = 1.0, CIs too narrow) and the pure asymptotic ARE (constant = π²/9 ≈ 1.097, CIs slightly too wide), pulled below the asymptotic value by finite-sample corrections. For the CI 
+equation, see [Statistical methods](#statistical-methods).
+
+**Why the 1.06 is not applied to asymptotic power:** A previous version also applied $`\sqrt{1/1.06}`$ to the asymptotic power noncentrality parameter; this was removed because (a) no published source applies an efficiency deflation to the nc parameter, (b) the 1.06 was calibrated for CI coverage in z-space, not for the non-central t framework, and (c) even if a deflation were justified, 1.06 is the wrong constant (the theoretical value would be π²/9 ≈ 1.097, not 1.06). See AUDIT.md "Bonett-Wright 1.06 Excluded from Noncentrality Parameter" for the full analysis.
 
 ### Why non-central t for power?
 
@@ -540,7 +592,7 @@ With `n_reps`=200, SE ≈ 0.009 (worst case N=73), so the third decimal is uncer
 \mathrm{Var}(\bar{L}) = \frac{\sigma_{\mathrm{rep}}^2}{n_{\mathrm{reps}}} + \frac{0.024375}{n_{\mathrm{reps}}\, n_{\mathrm{boot}}\, f^2}
 ```
 
-where $`\sigma_{\mathrm{rep}} \approx 0.13`$ (inter-rep SD, conservative worst case with ties; see [`n_reps`, SE, and reliability](#n_reps-se-and-reliability-of-the-second-decimal) above). The ratio of the bootstrap term to the inter-rep term is $`0.024375 / (n_{\mathrm{boot}} \, f^2 \, \sigma_{\mathrm{rep}}^2)`$. With $`n_{\mathrm{boot}} = 500`$ and a conservative $`f = 1`$, this ratio is $`0.024375 / (500 \times 1 \times 0.0169) \approx 0.003`$, so the bootstrap term adds **~0.3% to the variance** and **~0.15% to SE** — negligible. The benchmark scripts therefore use the approximation $`\mathrm{SE} \approx \sigma_{\mathrm{rep}} / \sqrt{n_{\mathrm{reps}}}`$ (see [Equations to compute Precision](#equations-to-compute-precision) for the full derivation and numerical comparison).
+where $`\sigma_{\mathrm{rep}} \approx 0.13`$ (inter-rep SD, conservative worst case with ties; see [`n_reps`, SE, and reliability](#n_reps-se-and-reliability-of-the-second-decimal) above). The ratio of the bootstrap term to the inter-rep term is $`0.024375 / (n_{\mathrm{boot}} \, f^2 \, \sigma_{\mathrm{rep}}^2)`$. With $`n_{\mathrm{boot}} = 500`$ and the simplification $`f = 1`$, this ratio is $`0.024375 / (500 \times 1 \times 0.0169) \approx 0.003`$, so the bootstrap term adds **~0.3% to the variance** and **~0.15% to SE** — negligible. The realistic value $`f = \varphi(-1.96)/\sigma_{\mathrm{boot}}`$, where $`\sigma_{\mathrm{boot}}`$ follows the same Bonett-Wright formula as $`\sigma_{\mathrm{rep}}`$ (evaluated at the observed $`\rho`$ rather than the CI endpoint), gives $`f \approx 0.45`$–$`0.52`$ for the current data. This makes the actual ratio 3.7–4.9× larger (~1.1–1.4% of variance), still negligible. In fact, substituting $`\sigma_{\mathrm{rep}}`$ for $`\sigma_{\mathrm{boot}}`$ (a conservative upper bound at the worst case) yields a **parameter-free bound**: the ratio reduces to $`p(1-p) / (n_{\mathrm{boot}} \times \varphi(-1.96)^2) = 1.43\%`$ of variance, independent of all data parameters. See [UNCERTAINTY_BUDGET.md](docs/UNCERTAINTY_BUDGET.md) Part 2, Source 2 for the full derivation. The benchmark scripts therefore use the approximation $`\mathrm{SE} \approx \sigma_{\mathrm{rep}} / \sqrt{n_{\mathrm{reps}}}`$ (see [Equations to compute Precision](#equations-to-compute-precision) for the full derivation and numerical comparison).
 
 With `n_reps` ≥ 2600:
 
@@ -616,7 +668,7 @@ For power near 0.80, $`\mathrm{SE}(\hat{p}) \approx 0.4 / \sqrt{n_{\mathrm{sims}
 \mathrm{SE}_{\mathrm{bisection}}(\rho^*) = \frac{\sqrt{\pi(1-\pi)/n_{\mathrm{sims}}}}{|\text{power}'(\rho^*)|}  = \frac{c}{\sqrt{n_{\mathrm{sims}}}}, \qquad c \equiv \frac{\sqrt{\pi(1-\pi)}}{|\text{power}'(\rho^*)|}
 ```
 
-This is a standard result in stochastic root-finding (e.g. Waeber, Frazier & Henderson 2013). The coefficient *c* depends on the slope of the power curve at the 80% crossing. For the asymptotic (no-tie) power function $`\text{power}(\rho) = \Phi(\mathrm{ncp}(\rho) - z_{\alpha/2})`$ where $`\mathrm{ncp} = \rho\sqrt{n-2}/\sqrt{1-\rho^2}`$:
+This is a standard result in stochastic root-finding (Waeber, Frazier & Henderson, 2013, *SIAM J. Control Optim.* 51(3)). The coefficient *c* depends on the slope of the power curve at the 80% crossing. For the asymptotic (no-tie) power function $`\text{power}(\rho) = \Phi(\mathrm{ncp}(\rho) - z_{\alpha/2})`$ where $`\mathrm{ncp} = \rho\sqrt{n-2}/\sqrt{1-\rho^2}`$:
 
 | n | $`\rho^*`$ (80% crossing) | slope | c |
 |---|---|---|---|
@@ -639,6 +691,7 @@ For $`\rho = 0.30`$ (the calibration probe), k ranges from **0.105** (n=82) to *
 ```
 - **95% CI half-width:** Half-width ≈ 1.96 × $`\mathrm{SE}_{\mathrm{total}}(\rho)`$. For target half-width w, aim for $`\mathrm{SE}_{\mathrm{total}} \leq w / 1.96`$.
 - **Rounding:** For the reported value to round safely to a band (e.g. 0.35), the whole 95% CI should lie inside that band (e.g. half-width ≤ 0.005 at the boundary). Wrong-rounding probability at a boundary depends on half-width; overall rounding confidence is typically ~90–95% when half-width is ±0.002 and true values are not at boundaries. Numerical guidance: n_sims ≈ 3k, n_cal ≈ 1k for ±0.01; for rounding safety near 0.35, wrong-rounding ~15–25% at 0.346, overall ~90–95%.
+- **Consolidated error budget:** See [docs/UNCERTAINTY_BUDGET.md](docs/UNCERTAINTY_BUDGET.md) for all power and CI error sources (including precomputed null realization variance, calibration interpolation, permutation noise, and bootstrap quantile noise) in a single reference table, with numerical values for each precision tier and a quick-reference parameter table.
 
 #### Permutation p-value noise in power estimates
 
@@ -681,8 +734,10 @@ The variance decomposition above (Var(π̂) = [...] / n_sims) applies to the **M
 
 When `config.EMPIRICAL_USE_PRECOMPUTED_NULL = True` (default), the empirical
 generator uses the same precomputed null as other generators. The precomputed
-null permutes all-distinct y-ranks {1..n}; but empirical y-data has ties from
-the finite pool (digitized values repeated via bootstrap resampling). This
+null permutes all-distinct y-ranks {1..n}; but empirical y-data always has
+ties — the pool is 71 digitized values with pre-existing duplicates, resampled
+into n = 73–81 draws, so ties are guaranteed in every realization by both
+pigeonhole and the pool's own repeated measurements. This
 section quantifies the approximation error.
 
 **Source of error.** The precomputed null computes each null rho as:
@@ -780,7 +835,7 @@ where $`\sigma_{\mathrm{rep}} \approx 0.13`$ is the inter-rep SD (analytical wor
 
 where *w* is the target 95% CI half-width.
 
-**Numerical comparison** ($`\sigma_{\mathrm{rep}} = 0.13`$, $`n_{\mathrm{boot}} = 500`$, conservative $`f = 1`$):
+**Numerical comparison** ($`\sigma_{\mathrm{rep}} = 0.13`$, $`n_{\mathrm{boot}} = 500`$, $`f = 1`$ simplification):
 
 | Target half-width | `n_reps` | SE (approx) | SE (exact) | Ratio | ΔHW |
 |--------------------|----------|-------------|------------|-------|-----|
@@ -788,7 +843,7 @@ where *w* is the target 95% CI half-width.
 | ±0.002 | 16 231 | 0.001020 | 0.001022 | 1.0015 | 3.9 × 10⁻⁶ |
 | ±0.001 | 64 923 | 0.000510 | 0.000511 | 1.0014 | 1.4 × 10⁻⁶ |
 
-The bootstrap term inflates SE by only **~0.15%** across all tiers — well below other sources of uncertainty (e.g. the $`f = 1`$ conservatism). The approximation is therefore safe.
+The bootstrap term inflates SE by only **~0.15%** across all tiers with $`f = 1`$, and at most **~0.54%** with the realistic $`f \approx 0.53`$ — well below other sources of uncertainty. The approximation is therefore safe regardless of the true $`f`$.
 
 ### Benchmark data (CI bootstrap)
 
