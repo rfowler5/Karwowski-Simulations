@@ -31,6 +31,14 @@ n_sims. At n_sims=2000 the empirical generator gives c ranging from ~0.10 to ~0.
 seed (e.g. seed 42 -> 0.18, seed 50 -> 0.10, seed 55 -> 0.12). At n_sims=5000-10000 the estimates
 converge to ~0.14 regardless of seed. Use --n-sims 5000 or higher for stable c estimates. The
 default --n-sims 2000 is adequate for quick checks but should not be used to set benchmark constants.
+
+Dependencies: c depends on n and rho* (min detectable rho at 80% power). It does
+NOT depend on n_sims (c is a property of the power curve, not the simulation count;
+n_sims >= 5000 is needed only for stable *estimation* of c via finite-difference
+slope). The analytical formula is generator-independent, but rho* itself is
+generator-dependent. c increases with rho*, so use the upper bound on rho* for
+conservatism. See docs/PRECISION_WHEN_DATA_CHANGES.md "Coefficient dependencies"
+and "Step-by-step process" for the recommended workflow.
 """
 
 import math

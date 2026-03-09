@@ -36,6 +36,15 @@ Usage:
 With different data: use the case that matches your n (or pass --n and --rho directly
 with --analytical), then run this script. Use the reported sigma_rep in
 benchmarks/benchmark_precision_params.py (SD_INTER_REP) and re-run benchmark scripts.
+
+Dependencies: sigma_rep depends on n, observed rho (from case data), and tie
+structure (FHP factor). It does NOT depend on n_sims, n_reps, n_boot, rho*,
+probe rho, or generator. The analytical formula is instant and stable. n_boot
+does not affect sigma_rep; when estimating empirically, the observed SD across
+replications includes a small bootstrap quantile noise component (< 1.5% of
+variance at n_boot >= 500) but this is a separate error source, not part of
+sigma_rep itself. See docs/PRECISION_WHEN_DATA_CHANGES.md "Coefficient
+dependencies" for details.
 """
 
 import math

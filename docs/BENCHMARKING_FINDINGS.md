@@ -119,15 +119,18 @@ Using the measured full-grid run above:
 
 ## Memory Issues
 
-**Symptom:** `TerminatedWorkerError: A worker process managed by the executor was unexpectedly terminated. This could be caused by a segmentation fault or by an excessive memory usage causing the Operating System to kill the worker.`
+**Fixed:** The batch path previously allocated `boot_idx_all` of shape `(n_boot, n_reps, n)` in a single call, which would require:
 
-**Cause:** The batch path allocates `boot_idx_all` of shape `(n_boot, n_reps, n)` = (1000, 200, ~80) ≈ **64 MB per scenario**. At 10k n_reps, 1k n_boot: (1000, 10_000, ~80) ≈ **3.2 GB per scenario**. With `n_jobs=-1`, multiple workers run concurrently; total memory can spike.
+| Tier | n_reps | Allocation size |
+|------|--------|----------------|
+| Benchmark | 200 | ~64 MB |
+| ±0.01 | 1,300 | ~417 MB |
+| ±0.002 | 32,500 | ~10.4 GB — would crash |
+| ±0.001 | 129,700 | ~41.5 GB — impossible |
 
-**Mitigations:**
-1. Use `n_jobs=4` or `n_jobs=2` instead of `-1` to limit concurrent workers
-2. Run parallel benchmarks one at a time (don't run old and new path parallel back-to-back if memory is tight)
-3. Reduce `n_reps` or `n_boot` for benchmarking (e.g. n_reps=100, n_boot=500)
-4. Use sequential (`n_jobs=1`) for the batch path — avoids worker memory multiplication
+Bootstrap indices are now generated in chunks of `_BATCH_BOOTSTRAP_CHUNK_SIZE` (default 2000) reps at a time. Peak memory per chunk is bounded at `n_boot × 2000 × n × 4` bytes ≈ **328 MB** regardless of total `n_reps`. The values are statistically equivalent and reproducible for a fixed seed and chunk size.
+
+**Remaining parallel memory concern:** With `n_jobs=-1`, multiple joblib workers run concurrently, each holding its own x_all/y_all/boot_rho_matrix arrays. For large `n_reps` tiers, prefer `n_jobs=1` (which is also the fastest configuration for the batch path — see above).
 
 **Killing stuck workers:**
 ```powershell
@@ -152,7 +155,7 @@ Get-Process python* | Stop-Process -Force
 
 | Script | Purpose |
 |--------|---------|
-| `test_batch_bootstrap_ci.py` | (1) Bit-identical test: batch vs old path, same data & bootstrap indices. (2) Sequential Numba=1: batch faster than old. (3) Batch path parallel vs sequential; (3b) old path parallel vs sequential. Optional: power sim vectorized vs scalar. Uses small n_reps/n_boot. |
+| `test_batch_bootstrap_ci.py` | (1) Bit-identical test: batch vs old path, same data & bootstrap indices. (2) Sequential Numba=1: batch faster than old. (3) Batch path parallel vs sequential; (3b) old path parallel vs sequential. (4) Chunked bootstrap: JIT slice bit-identical test + reproducibility under forced `_boot_chunk_size=2`. Optional: power sim vectorized vs scalar. Uses small n_reps/n_boot. |
 | `test_nested_parallelism.py` | Isolates nested parallelism: runs same workload (batch, n_jobs=-1) in two processes — default Numba threads vs `NUMBA_NUM_THREADS=1`. Use `--compare`. Confirmed default 4–11% slower across three runs. |
 | `test_batch_sequential_vs_parallel.py` | Compares batch sequential (default Numba) vs batch parallel (Numba=1) in separate processes. Use `--compare`. Shows whether the “large gap” is joblib vs nested parallelism. |
 
@@ -160,14 +163,14 @@ Get-Process python* | Stop-Process -Force
 
 ---
 
-## Scaling: Large Runs (e.g. 10k n_reps, 1k n_boot)
+## Scaling: Large Runs (e.g. high-tier n_reps)
 
 **Sequential batch path with default Numba:**
 
-- **Memory:** Dominant allocation is `boot_idx_all` shape `(n_boot, n_reps, n)` → (1000, 10_000, ~80) ≈ **3.2 GB** per scenario. Sequential runs one scenario at a time, so peak ~3–4 GB. Fine on a 32 GB machine.
-- **Time:** Work scales with n_reps × n_boot; 10k×1k is 50× more work than 200×1k, so full grid runtime scales accordingly (~2+ hours for 88 scenarios). No efficiency cliff.
+- **Memory:** Bootstrap index memory is bounded at ~328 MB per chunk (chunk_size=2000, n_boot=500, n≈82) regardless of total `n_reps`. The dominant allocations at large n_reps are `x_all` and `y_all` of shape `(n_reps, n)` float64 — e.g. at n_reps=129,700 and n=82 these are ~85 MB each. Sequential processes one scenario at a time.
+- **Time:** Work scales with n_reps × n_boot; full grid runtime scales accordingly. No efficiency cliff from chunking (the loop overhead is negligible compared to JIT compute).
 
-**Recommendation:** For large runs, use **sequential (`n_jobs=1`)** with the batch path; no need to worry about memory or slowdown from the algorithm.
+**Recommendation:** For large runs, use **sequential (`n_jobs=1`)** with the batch path; memory is bounded by chunking.
 
 ---
 

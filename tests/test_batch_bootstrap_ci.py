@@ -1,6 +1,11 @@
 """
-Validate batch CI path: (1) bit-identical with old path, (2) batch faster when sequential,
-(3) slowdown only when parallelism is used. Uses small n_reps/n_boot for speed.
+Validate batch CI path:
+  (1) bit-identical with old path given same data & bootstrap indices,
+  (2) batch faster than old path when sequential,
+  (3) slowdown only when parallelism is used,
+  (4) chunked bootstrap: JIT slicing is bit-identical; bootstrap_ci_averaged
+      is reproducible under forced chunking.
+Uses small n_reps/n_boot for speed.
 """
 import sys
 from pathlib import Path
@@ -16,7 +21,9 @@ import time
 os.environ["NUMBA_NUM_THREADS"] = "1"
 
 from config import CASES
-from confidence_interval_calculator import bootstrap_ci_averaged, run_all_ci_scenarios
+from confidence_interval_calculator import (bootstrap_ci_averaged,
+                                             run_all_ci_scenarios,
+                                             _BATCH_BOOTSTRAP_CHUNK_SIZE)
 from spearman_helpers import (
     _bootstrap_rhos_jit,
     _batch_bootstrap_rhos_jit,
@@ -180,7 +187,83 @@ print(f"  vectorize=True:  power = {pw_vec:.4f}")
 print(f"  vectorize=False: power = {pw_scalar:.4f}")
 print(f"  difference: {abs(pw_vec - pw_scalar):.4f} (expect small for same seed)")
 
+# ---------------------------------------------------------------------------
+# Step 4: Chunked bootstrap correctness
+# ---------------------------------------------------------------------------
+print("\nStep 4: Chunked bootstrap")
+print(f"  _BATCH_BOOTSTRAP_CHUNK_SIZE = {_BATCH_BOOTSTRAP_CHUNK_SIZE}")
+
+# Step 4a: JIT-level slicing test.
+# Given a pre-generated boot_idx_all, calling the JIT on slices (chunks) and
+# concatenating must give bit-identical results to calling it on the full array.
+# This directly validates that the chunking loop in bootstrap_ci_averaged
+# produces the same values as a single un-chunked JIT call.
+print("\nStep 4a: JIT slice bit-identical test")
+ss4 = np.random.SeedSequence(SEED + 10)
+data_rng4, boot_rng4 = [np.random.default_rng(s) for s in ss4.spawn(2)]
+
+ln_params4 = _fit_lognormal(y_params["median"], y_params["iqr"])
+cal_rho4 = calibrate_rho(
+    n, k, dt, rho_s, y_params,
+    all_distinct=False, calibration_mode="single")
+
+x_all4 = generate_cumulative_aluminum_batch(
+    N_REPS, n, k, distribution_type=dt, all_distinct=False, rng=data_rng4)
+y_all4 = generate_y_nonparametric_batch(
+    x_all4, rho_s, y_params, rng=data_rng4,
+    _calibrated_rho=cal_rho4, _ln_params=ln_params4)
+
+# Pre-generate full boot_idx_all (same layout the JIT expects)
+boot_idx_full = boot_rng4.integers(0, n, size=(N_BOOT, N_REPS, n), dtype=np.int32)
+
+# Full-array JIT result
+full_result = _batch_bootstrap_rhos_jit(
+    x_all4.astype(np.float64), y_all4.astype(np.float64), boot_idx_full)
+
+# Chunked: split N_REPS=5 into chunks of size 2 → [0:2], [2:4], [4:5]
+CHUNK_4A = 2
+chunks = []
+for cs in range(0, N_REPS, CHUNK_4A):
+    ce = min(cs + CHUNK_4A, N_REPS)
+    chunk_result = _batch_bootstrap_rhos_jit(
+        x_all4[cs:ce].astype(np.float64),
+        y_all4[cs:ce].astype(np.float64),
+        boot_idx_full[:, cs:ce, :])
+    chunks.append(chunk_result)
+chunked_result = np.concatenate(chunks, axis=0)
+
+diff4a = np.abs(full_result - chunked_result)
+max_diff4a = np.max(diff4a)
+ok4a = max_diff4a < 1e-10
+print(f"  max |full - chunked JIT| over (rep, boot): {max_diff4a:.2e}  ->  "
+      f"{'PASS' if ok4a else 'FAIL'}")
+
+# Step 4b: Reproducibility under forced chunking.
+# bootstrap_ci_averaged with _boot_chunk_size=2 run twice with the same seed
+# must produce bit-identical CI endpoints.
+print("\nStep 4b: bootstrap_ci_averaged reproducibility with forced chunking")
+ci_chunk_run1 = bootstrap_ci_averaged(
+    n, k, dt, rho_s, y_params,
+    generator="nonparametric", n_reps=N_REPS, n_boot=N_BOOT,
+    seed=SEED + 11, batch_bootstrap=True, _boot_chunk_size=CHUNK_4A)
+ci_chunk_run2 = bootstrap_ci_averaged(
+    n, k, dt, rho_s, y_params,
+    generator="nonparametric", n_reps=N_REPS, n_boot=N_BOOT,
+    seed=SEED + 11, batch_bootstrap=True, _boot_chunk_size=CHUNK_4A)
+
+ok4b = (ci_chunk_run1["ci_lower"] == ci_chunk_run2["ci_lower"] and
+        ci_chunk_run1["ci_upper"] == ci_chunk_run2["ci_upper"])
+print(f"  Run 1: lower={ci_chunk_run1['ci_lower']:.4f}, upper={ci_chunk_run1['ci_upper']:.4f}")
+print(f"  Run 2: lower={ci_chunk_run2['ci_lower']:.4f}, upper={ci_chunk_run2['ci_upper']:.4f}")
+print(f"  Bit-identical: {ok4b}  ->  {'PASS' if ok4b else 'FAIL'}")
+
 print("\nDone.")
 if not ok1:
     print("FAIL: Step 1 (bit-identical) failed.")
+    sys.exit(1)
+if not ok4a:
+    print("FAIL: Step 4a (JIT slice bit-identical) failed.")
+    sys.exit(1)
+if not ok4b:
+    print("FAIL: Step 4b (chunked reproducibility) failed.")
     sys.exit(1)

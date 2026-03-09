@@ -37,6 +37,14 @@ n_reps and second-decimal reliability:
   SE of mean = SD/√n_reps. n_reps=200 → SE ≈ 0.009 (borderline for 2-decimal
   precision). SE < 0.005 needs n_reps ≈ 650+; SE < 0.0025 (strong confidence)
   needs ≈ 2600+. See README "Bootstrap CI" for details.
+
+Memory: batch bootstrap path
+-----------------------------
+The batch path allocates bootstrap index arrays of shape (n_boot, chunk, n)
+where chunk = _BATCH_BOOTSTRAP_CHUNK_SIZE (default 2000).  Peak memory per
+chunk ≈ n_boot × chunk × n × 4 bytes (int32); at n_boot=500, chunk=2000, n=82
+this is ~328 MB.  n_reps is processed in sequential chunks so total n_reps
+(e.g. 129,700 at the ±0.001 tier) does not cause a single large allocation.
 """
 
 import warnings
@@ -64,6 +72,14 @@ from power_asymptotic import asymptotic_ci, get_x_counts
 from spearman_helpers import (spearman_rho_2d, _fast_spearman_rho,
                               _bootstrap_rhos_jit, _batch_bootstrap_rhos_jit,
                               use_numba)
+
+# Maximum number of n_reps processed per JIT call in the batch bootstrap path.
+# Each call allocates (n_boot × chunk × n) int32 indices; at the default values
+# (n_boot=500, chunk=2000, n≈82) this is ~328 MB.  Keeps memory bounded
+# regardless of total n_reps (e.g. 129,700 at the ±0.001 tier without chunking
+# would need ~20 GB).  Override via the private _boot_chunk_size parameter of
+# bootstrap_ci_averaged (for testing).
+_BATCH_BOOTSTRAP_CHUNK_SIZE = 2000
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +191,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                            generator="nonparametric", n_reps=200, n_boot=None,
                            alpha=None, all_distinct=False, seed=None,
                            freq_dict=None, calibration_mode=None, vectorize=None,
-                           batch_bootstrap=None, n_cal=None):
+                           batch_bootstrap=None, n_cal=None,
+                           _boot_chunk_size=None):
     """Average bootstrap CI endpoints over *n_reps* independent datasets.
 
     This is the correct approach when working with simulated (not observed)
@@ -193,6 +210,11 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         accurate absolute endpoint values, set n_cal to the tier value
         from config.CI_TIERS (e.g. 1000 for ±0.01).  See
         docs/UNCERTAINTY_BUDGET.md Part 2 for the full budget.
+    _boot_chunk_size : int or None
+        Private parameter for testing.  Overrides _BATCH_BOOTSTRAP_CHUNK_SIZE
+        for the batch bootstrap path.  Pass a small value (e.g. 2) to force
+        chunking even at small n_reps.  Has no effect when batch_bootstrap is
+        False or vectorize is False.
 
     Returns
     -------
@@ -300,20 +322,34 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         # Step 2: Compute rho_hats in one vectorized call
         rho_hats = spearman_rho_2d(x_all, y_all)  # (n_reps,)
 
-        # Step 3-4: Bootstrap resampling
-        boot_idx_all = boot_rng.integers(0, n, size=(n_boot, n_reps, n),
-                                         dtype=np.int32)
-        if use_numba() and _batch_bootstrap_rhos_jit is not None:
-            boot_rho_matrix = _batch_bootstrap_rhos_jit(
-                x_all.astype(np.float64), y_all.astype(np.float64),
-                boot_idx_all)
-        else:
-            boot_rho_matrix = np.empty((n_reps, n_boot))
-            rows = np.arange(n_reps)[:, None]
-            for b in range(n_boot):
-                x_boot = x_all[rows, boot_idx_all[b]]
-                y_boot = y_all[rows, boot_idx_all[b]]
-                boot_rho_matrix[:, b] = spearman_rho_2d(x_boot, y_boot)
+        # Step 3-4: Bootstrap resampling — chunked over n_reps to bound
+        # memory.  Each chunk allocates (n_boot × cs × n) int32 indices;
+        # at n_boot=500, cs=2000, n=82 this is ~328 MB regardless of the
+        # total n_reps.  Note: the RNG sequence differs from a single
+        # (n_boot, n_reps, n) call because values are consumed in
+        # (n_boot, cs, n) C-order blocks rather than one contiguous block.
+        # Results are statistically equivalent and reproducible for fixed
+        # chunk_size + seed.
+        chunk_size = (_boot_chunk_size if _boot_chunk_size is not None
+                      else _BATCH_BOOTSTRAP_CHUNK_SIZE)
+        boot_rho_matrix = np.empty((n_reps, n_boot), dtype=np.float64)
+        for chunk_start in range(0, n_reps, chunk_size):
+            chunk_end = min(chunk_start + chunk_size, n_reps)
+            cs = chunk_end - chunk_start
+            boot_idx_chunk = boot_rng.integers(0, n, size=(n_boot, cs, n),
+                                               dtype=np.int32)
+            if use_numba() and _batch_bootstrap_rhos_jit is not None:
+                boot_rho_matrix[chunk_start:chunk_end] = _batch_bootstrap_rhos_jit(
+                    x_all[chunk_start:chunk_end].astype(np.float64),
+                    y_all[chunk_start:chunk_end].astype(np.float64),
+                    boot_idx_chunk)
+            else:
+                rows = np.arange(cs)[:, None]
+                for b in range(n_boot):
+                    x_boot = x_all[chunk_start:chunk_end][rows, boot_idx_chunk[b]]
+                    y_boot = y_all[chunk_start:chunk_end][rows, boot_idx_chunk[b]]
+                    boot_rho_matrix[chunk_start:chunk_end, b] = spearman_rho_2d(
+                        x_boot, y_boot)
 
         # Step 5: Percentiles per rep
         lowers = np.nanpercentile(boot_rho_matrix, 100 * alpha / 2, axis=1)

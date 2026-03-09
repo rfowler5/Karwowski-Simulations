@@ -29,24 +29,28 @@ from config import TIERS
 
 # --- Power coefficients ---
 # Bisection: SE = C_BISECTION / sqrt(n_sims).
+# Depends on: n and rho* (min detectable rho). Does NOT depend on n_sims.
 # Asymptotic (no-tie) c at worst-case rho* (~0.33) for current data. Empirical (tied) c
-# converges to ~0.12-0.15 at n_sims >= 5000; 0.17 provides ~20% margin.
-# Note: the formula SE = c/sqrt(n_sims) is valid at all n_sims including the +-0.01 tier
-# (n_sims=2220). The n_sims >= 5000 guidance applies only to empirically RE-ESTIMATING c
-# via scripts/estimate_bisection_c.py (the finite-difference slope is noisy at n_sims=2000,
-# ranging ~0.10-0.18 depending on seed). See README and docs/UNCERTAINTY_BUDGET.md Part 1.
+# converges to ~0.12-0.15 at n_sims >= 5000; 0.17 provides ~20% margin. c increases
+# monotonically with rho*, so use upper bound on rho* for conservatism.
+# See docs/PRECISION_WHEN_DATA_CHANGES.md "Coefficient dependencies" and "Step-by-step
+# process" for when and how to re-estimate for new data.
 C_BISECTION = 0.17
 # Calibration: SE = C_CAL / sqrt(n_cal).
-# Analytical: k = (1 - rho^2) * sqrt(1.06/(n-3)) via Bonett-Wright delta method.
-# For rho=0.30 (probe), range 0.105 (n=82) to 0.112 (n=73). Empirical ~0.10.
-# Use 0.112 as worst-case (n=73).
+# Depends on: n and probe rho (fixed at 0.30). Does NOT depend on n_sims, observed rho,
+# rho*, or generator. Varies by probe in multipoint calibration (0.092-0.122 for n=73);
+# 0.112 at probe 0.30 is appropriate for power. For CI at very small observed rho, the
+# relevant probe is 0.10 where k ≈ 0.122. See docs/PRECISION_WHEN_DATA_CHANGES.md.
 C_CAL = 0.112
 
 # --- CI coefficients ---
 # Inter-rep SD: SD(endpoint) = (1 - endpoint^2) * sqrt(1.06/(n-3)) * FHP_factor.
+# Depends on: n, observed rho (from case data), and tie structure (FHP).
+# Does NOT depend on n_sims, n_reps, n_boot, rho*, or generator.
 # Worst case: Case 3 (n=73), upper endpoint near 0 -> (1 - 0.11^2) * sqrt(1.06/70)
 # = 0.1216 (no ties), * 1.057 (worst-case FHP, k=4 heavy_center) = 0.129.
 # Use 0.13 (rounded) as conservative estimate. Empirical max (n_reps=200): 0.130.
+# See docs/PRECISION_WHEN_DATA_CHANGES.md for re-estimation guidance.
 SD_INTER_REP = 0.13
 N_BOOT_DEFAULT = 500
 # Bootstrap quantile noise: p*(1-p) for p=0.025 (2.5th percentile endpoint).

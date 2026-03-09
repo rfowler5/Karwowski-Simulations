@@ -388,25 +388,403 @@ is not controlled by these simulation parameters.
 The numerical values in this document are for the Karwowski study
 (n ≈ 73–82, current tie structures in config.CASES). For different data:
 
-1. **Re-estimate c** via `scripts/estimate_bisection_c.py` using **n_sims ≥ 5,000**.
-   At n_sims = 2,000 the finite-difference slope estimator is highly variable
-   (c-hat ranges from ~0.10 to ~0.18 depending on seed for the same scenario).
-   This is a property of the estimation procedure — the underlying formula
-   SE = c/√n_sims is valid at all n_sims. The analytical formula gives c = 0.17
-   at worst-case ρ* ≈ 0.33 and is suitable as a conservative upper bound when
-   simulation data is unavailable.
-
-2. **Re-estimate k** via `scripts/estimate_calibration_k.py --analytical` (instant).
+1. **Re-estimate k** via `scripts/estimate_calibration_k.py --analytical` (instant).
    Formula: k = (1 − ρ²) √(1.06/(n−3)) at the calibration probe ρ = 0.30.
+   Depends on n only (probe ρ is a fixed design constant). Take worst case
+   across cases (smallest n).
 
-3. **Re-estimate σ_rep** via `scripts/estimate_interrep_sd.py --analytical --with-ties`.
+2. **Re-estimate σ_rep** via `scripts/estimate_interrep_sd.py --analytical --with-ties`.
    Formula: σ_rep = (1 − endpoint²) × √(1.06/(n−3)) × FHP_factor.
+   Depends on n, observed ρ (from case data), and tie structure. Does not
+   depend on n_boot. Take worst case across cases.
+
+3. **Re-estimate c** via `scripts/estimate_bisection_c.py --analytical --rho <rho*>`.
+   Formula: c = √(π(1−π)) / |power′(ρ*)|. This is the only coefficient that
+   requires ρ* (a simulation output). Use a conservative ρ* guess initially,
+   then refine after a quick ±0.01 run. The analytical (no-tie) formula is
+   generator-independent and conservative. c increases with ρ*, so round ρ*
+   **up** for conservatism. For empirical re-estimation, use n_sims ≥ 5,000
+   (the finite-difference slope estimator is highly variable at n_sims = 2,000).
 
 4. Update `C_BISECTION`, `C_CAL`, `SD_INTER_REP` in
    `benchmarks/benchmark_precision_params.py` and re-run it.
 
 See [PRECISION\_WHEN\_DATA\_CHANGES.md](PRECISION_WHEN_DATA_CHANGES.md) for
-detailed guidance and sensitivity tables.
+the full step-by-step process, coefficient dependency table, and sensitivity
+analysis (including k variation across multipoint calibration probes).
+
+---
+
+## Part 6: Runtime optimization — Neyman allocation and disk-persistent calibration
+
+This section analyzes how precomputing calibration to disk affects the
+runtime–precision trade-off and derives optimized tier parameters for use
+with disk persistence. It covers two configurations:
+
+- **Option A (conservative):** current balanced tiers + disk persistence
+  (saves calibration warmup time only).
+- **Option B (aggressive):** disk persistence + reduced n\_sims / n\_reps
+  (saves up to ~45% of per-run time at ±0.001).
+
+All cost estimates use the nonparametric/empirical fast-path generators.
+Copula costs differ (see caveats at end of section).
+
+### Why the balanced design is not runtime-optimal
+
+The balanced tier design (Parts 1–3) equalizes variance contributions:
+
+```
+σ² = C_B²/n_sims + C_K²/n_cal = S,    with C_B²/n_sims = C_K²/n_cal = S/2
+```
+
+This gives n\_sims = 2C\_B²/S and n\_cal = 2C\_K²/S. Equal-variance
+allocation minimizes total variance at fixed total sample count
+(n\_sims + n\_cal), but not at fixed **runtime**. The per-unit costs
+differ (benchmarked on NP/empirical, hot cache, 88 scenarios):
+
+```
+c_sim ≈ 0.589 s/unit    (29.45s at n_sims=50)
+c_cal ≈ 0.113 s/unit    (34s at n_cal=300)
+```
+
+Calibration is ~5× cheaper per unit than simulation.
+
+**Neyman allocation (minimum runtime per run).** Minimizing
+T = c\_sim × n\_sims + c\_cal × n\_cal subject to the precision constraint,
+the Lagrange optimality conditions give:
+
+```
+∂L/∂n_sims = c_sim − λ C_B²/n_sims² = 0   →   n_sims = C_B √(λ/c_sim)
+∂L/∂n_cal  = c_cal − λ C_K²/n_cal² = 0   →   n_cal  = C_K √(λ/c_cal)
+
+Ratio:  n_sims/n_cal = (C_B/C_K) × √(c_cal/c_sim)
+                     = (0.17/0.112) × √(0.113/0.589)
+                     = 1.518 × 0.438 = 0.665
+```
+
+The minimum-time allocation has n\_cal ≈ 1.50 × n\_sims — **more**
+calibration than simulation — because calibration is cheaper per unit.
+The minimum cost envelope is:
+
+```
+T_min = (C_B √c_sim + C_K √c_cal)² / S
+T_bal = 2(C_B² c_sim + C_K² c_cal) / S
+
+T_min / T_bal = (C_B √c_sim + C_K √c_cal)² / [2(C_B² c_sim + C_K² c_cal)]
+              = (0.1305 + 0.0377)² / [2 × (0.01702 + 0.001417)]
+              = 0.02827 / 0.03688
+              = 0.767
+```
+
+Neyman allocation saves ~23% of total runtime vs the balanced design.
+However, it **increases** calibration cost (higher n\_cal) to reduce
+simulation cost. No reallocation simultaneously reduces both calibration
+and total cost. Neyman allocation is therefore superseded by disk
+persistence (below), which eliminates calibration from per-run cost
+entirely.
+
+### Disk-persistent calibration
+
+Precomputing calibration once to disk and loading at runtime eliminates
+calibration from per-run cost:
+
+```
+T_run = c_sim × n_sims    (calibration ≈ 0, just file loading)
+```
+
+The precomputed n\_cal (denoted n\_cal\_pre) can be set independently of
+per-run cost since it is paid once.
+
+**Option A (conservative):** keep current POWER\_TIERS and CI\_TIERS.
+Precompute calibration at the existing n\_cal values. Per-run saving
+equals the calibration warmup time: ~3 hrs sequential at ±0.001 (~8% of
+total). No parameter changes required.
+
+**Option B (aggressive):** precompute calibration at a larger
+n\_cal\_pre, then use fewer n\_sims / n\_reps. With more precise
+calibration, less of the variance budget is consumed by calibration
+noise, freeing budget for bisection / inter-rep noise.
+
+### Deriving reduced n\_sims with disk persistence (Option B)
+
+From the precision constraint with n\_cal fixed at n\_cal\_pre:
+
+```
+C_B²/n_sims + C_K²/n_cal_pre = S
+
+n_sims = C_B² / (S − C_K²/n_cal_pre)
+```
+
+Valid when n\_cal\_pre > C\_K²/S (calibration alone must not exceed the
+total budget). At ±0.001: n\_cal\_pre > 48,200.
+
+**Limiting case.** As n\_cal\_pre → ∞:
+
+```
+n_sims_min = C_B² / S = n_sims_balanced / 2
+```
+
+The balanced design allocates exactly half the variance budget to
+calibration. Eliminating calibration noise frees that half for bisection,
+halving the required n\_sims: a **50% reduction in per-run simulation
+time** (theoretical maximum).
+
+**For CI endpoints,** the same structure applies with σ\_rep replacing
+C\_B and n\_reps replacing n\_sims:
+
+```
+n_reps = σ_rep² / (S − C_K²/n_cal_pre)
+```
+
+The same precomputed calibration cache serves both power and CI. A single
+precompute at n\_cal\_pre = 500,000 enables reduced n\_sims (power)
+**and** reduced n\_reps (CI) at all tiers.
+
+**General recipe.** For arbitrary target half-width h and precomputed
+n\_cal\_pre:
+
+```
+S        = (h / 1.96)²
+n_sims   = ⌈C_B²    / (S − C_K² / n_cal_pre)⌉     (power)
+n_reps   = ⌈σ_rep²  / (S − C_K² / n_cal_pre)⌉     (CI)
+n_boot   = 500                                       (unchanged)
+
+Requires: n_cal_pre > C_K² / S
+```
+
+### Practical savings vs n\_cal\_pre (±0.001 power tier)
+
+Constants: C\_B = 0.17, C\_K = 0.112, c\_sim = 0.589, c\_cal = 0.113.
+
+| n\_cal\_pre | Cal var (×10⁻⁷) | n\_sims | Per-run (hrs) | Δ vs balanced | Precompute seq (hrs) |
+|---|---|---|---|---|---|
+| 96,400 (balanced) | 1.301 | 222,050 | 36.3 | — | 3.0 |
+| 200,000 | 0.627 | 146,250 | 23.9 | −34% | 6.3 |
+| 500,000 | 0.251 | 122,900 | 20.1 | −45% | 15.7 |
+| 1,000,000 | 0.125 | 116,600 | 19.1 | −47% | 31.4 |
+| ∞ (limit) | 0 | 111,025 | 18.2 | −50% | — |
+
+Per-run times: T\_run = c\_sim × n\_sims (88 scenarios, NP/empirical).
+Diminishing returns: 68% of the possible savings are captured by
+n\_cal\_pre = 200,000; 89% by 500,000.
+
+### Optimized tier parameters (Option B, n\_cal\_pre = 500,000)
+
+**Power tiers:**
+
+| Half-width | n\_sims (balanced) | n\_sims (disk-opt) | Reduction | n\_cal\_pre |
+|---|---|---|---|---|
+| ±0.01 | 2,220 | 1,120 | 50% | 500,000 |
+| ±0.002 | 55,520 | 28,450 | 49% | 500,000 |
+| ±0.001 | 222,050 | 122,900 | 45% | 500,000 |
+
+Verification (±0.001): HW = 1.96 × √(0.0289/122,900 + 0.01254/500,000)
+= 1.96 × √(2.352×10⁻⁷ + 2.509×10⁻⁸) = 1.96 × 5.10×10⁻⁴ = 0.00100. ✓
+
+**CI tiers** (n\_boot = 500):
+
+| Half-width | n\_reps (balanced) | n\_reps (disk-opt) | Reduction | n\_cal\_pre |
+|---|---|---|---|---|
+| ±0.01 | 1,300 | 650 | 50% | 500,000 |
+| ±0.002 | 32,500 | 16,650 | 49% | 500,000 |
+| ±0.001 | 129,700 | 71,900 | 45% | 500,000 |
+
+The reduction is larger at looser tiers because calibration variance
+(C\_K²/500,000 = 2.51×10⁻⁸, a fixed quantity) is a smaller fraction of
+their larger budgets: 0.1% of S at ±0.01, 2.4% at ±0.002, 9.6% at
+±0.001.
+
+### Precompute cost and break-even
+
+One-time precompute cost: T\_pre = c\_cal × n\_cal\_pre / (P × η), where
+P = logical cores and η = parallel efficiency. Calibration for each of
+the 88 scenario types is independent — embarrassingly parallel. For
+CPU-bound array operations on 2 physical cores + hyperthreading (4
+logical), η ≈ 0.5–0.7 (HT adds ~20–30% throughput per physical core,
+not 100%):
+
+| n\_cal\_pre | Seq | 4-core η=0.7 | 4-core η=0.5 | 8-core η=0.75 |
+|---|---|---|---|---|
+| 200,000 | 6.3 hrs | 2.2 hrs | 3.2 hrs | 1.0 hrs |
+| 500,000 | 15.7 hrs | 5.6 hrs | 7.8 hrs | 2.6 hrs |
+
+Per-run savings (vs balanced + disk, ±0.001):
+
+| n\_cal\_pre | ΔT per run | T\_pre (4c, η=0.7) | Break-even |
+|---|---|---|---|
+| 200,000 | 12.4 hrs | 2.2 hrs | < 1 run |
+| 500,000 | 16.2 hrs | 5.6 hrs | < 1 run |
+
+Break-even is always less than one run at ±0.001: the precompute cost is
+recovered within a single run.
+
+**Total time including precompute (±0.001, n\_cal\_pre = 500,000, 4-core
+η = 0.7):**
+
+| Runs | Balanced + disk | Disk-opt | Savings |
+|---|---|---|---|
+| 1 | 37.4 hrs | 25.7 hrs | 31% |
+| 2 | 73.7 hrs | 45.8 hrs | 38% |
+| 3 | 110.0 hrs | 65.9 hrs | 40% |
+| Many | 36.3 hrs/run | 20.1 hrs/run | 45% |
+
+### CI-specific runtime savings
+
+The CI per-run cost depends on n\_reps and n\_boot (data generation +
+bootstrap). From benchmarks (empirical, hot cache, 88 scenarios,
+n\_boot = 500):
+
+```
+c_CI ≈ 0.587 s/rep    (117.44s at n_reps=200, sequential)
+```
+
+**Per-run CI time by tier (sequential, 88 scenarios):**
+
+| Tier | n\_reps (bal) | CI time (bal) | n\_reps (opt) | CI time (opt) | Savings |
+|---|---|---|---|---|---|
+| ±0.01 | 1,300 | 12.7 min | 650 | 6.4 min | 50% |
+| ±0.002 | 32,500 | 5.3 hrs | 16,650 | 2.7 hrs | 49% |
+| ±0.001 | 129,700 | 21.1 hrs | 71,900 | 11.7 hrs | 45% |
+
+CI savings are proportional to the n\_reps reduction and follow the same
+pattern as power savings. CI endpoints are unaffected by permutation
+noise — the CI pipeline uses bootstrap resampling, not permutation tests.
+Reducing n\_reps has no interaction with n\_perm.
+
+**Combined power + CI (±0.001, sequential, 88 scenarios):**
+
+| | Power | CI | Combined | Precompute (once) |
+|---|---|---|---|---|
+| Balanced + disk | 36.3 hrs | 21.1 hrs | 57.5 hrs/run | 1.1 hrs (4c, η=0.7) |
+| Disk-opt | 20.1 hrs | 11.7 hrs | 31.8 hrs/run | 5.6 hrs (4c, η=0.7) |
+| Savings | 45% | 45% | 45% | — |
+
+The same precomputed calibration cache serves both power and CI — the
+precompute cost is paid once for both.
+
+**Combined total including precompute (±0.001, n\_cal\_pre = 500,000,
+4-core η = 0.7):**
+
+| Runs | Balanced + disk | Disk-opt | Savings |
+|---|---|---|---|
+| 1 | 58.6 hrs | 37.4 hrs | 36% |
+| 2 | 116.0 hrs | 69.2 hrs | 40% |
+| Many | 57.5 hrs/run | 31.8 hrs/run | 45% |
+
+### Interaction with permutation noise (MC fallback path)
+
+With disk optimization, bisection accounts for ~90% of the power variance
+budget (vs 50% in the balanced design). The multiplicative SE inflation
+from per-sim permutation noise (Part 1, Source 5) therefore has slightly
+more impact on the total HW. **This source is absent when using the
+precomputed null (default configuration).** It affects only the MC fallback
+path (`EMPIRICAL_USE_PRECOMPUTED_NULL = False`).
+
+The SE inflation ε from finite n\_perm is a property of n\_perm alone,
+independent of n\_sims (see README "Permutation p-value noise in power
+estimates" for the derivation):
+
+```
+HW_inflated² = (1.96)² × [C_B²/n_sims × (1+ε)² + C_K²/n_cal_pre]
+```
+
+With the current config, n\_perm = 2,000 when n\_sims < 5,000 (ε ≈ 0.86%)
+and n\_perm = 1,000 otherwise (ε ≈ 1.21%).
+
+**Numerical verification (MC fallback path, worst case, all tiers):**
+
+| Tier | Design | n\_sims | n\_perm | ε | HW (inflated) | Target | Over? |
+|---|---|---|---|---|---|---|---|
+| ±0.01 | Balanced | 2,220 | 2,000 | 0.86% | 0.00995 | 0.01 | no |
+| ±0.01 | Disk-opt | 1,120 | 2,000 | 0.86% | 0.01005 | 0.01 | +0.5% |
+| ±0.002 | Balanced | 55,520 | 1,000 | 1.21% | 0.00201 | 0.002 | +0.6% |
+| ±0.002 | Disk-opt | 28,450 | 1,000 | 1.21% | 0.00202 | 0.002 | +1.2% |
+| ±0.001 | Balanced | 222,050 | 1,000 | 1.21% | 0.00101 | 0.001 | +0.6% |
+| ±0.001 | Disk-opt | 122,900 | 1,000 | 1.21% | 0.00101 | 0.001 | +1.1% |
+
+The ε values are worst case (f\_p(α) = 1); under realistic conditions the
+inflation is smaller (see README derivation).
+
+**Observations:**
+
+1. **Default (precomputed null): no interaction at any tier.** Source 5 is
+   absent — the precomputed null provides a single fixed critical value
+   with no per-sim noise. Disk-optimized tiers meet their precision
+   targets exactly (for sources 1+2).
+
+2. **MC fallback, ±0.01:** the balanced design stays within target
+   (0.00995 < 0.01) thanks to slack from rounding n\_cal up (963 → 1,000).
+   The disk-optimized design slightly exceeds (0.01005, +0.5%) because
+   calibration variance is negligible at n\_cal\_pre = 500,000, leaving no
+   slack. If using the MC fallback at ±0.01, increasing n\_sims from 1,120
+   to 1,140 compensates (adds < 1s of runtime).
+
+3. **MC fallback, ±0.002 and ±0.001:** both designs slightly exceed
+   targets. This is not new — the existing balanced tiers already
+   overshoot by ~0.6% when using the MC fallback. Disk optimization
+   increases the overshoot to ~1.1–1.2%, still negligible.
+
+4. **All overshoots ≤ 1.2%.** This is the same magnitude as Source 5 is
+   documented to contribute in Part 1. No new precision risk is
+   introduced by disk optimization.
+
+**Systematic review of all other power error sources with lower n\_sims:**
+
+| Source | Depends on n\_sims? | Effect of lower n\_sims |
+|---|---|---|
+| 1. Bisection MC | Yes (main term) | Accounted for in the formula |
+| 2. Calibration MC | No (one calibration, shared) | Unchanged |
+| 3. Null realization | No (one null, shared, correlated) | Unchanged (never averaged with n\_sims) |
+| 4. Interpolation | No (fixed structural error) | Unchanged |
+| 5. Permutation noise (MC only) | Multiplicative ε on SE | Analyzed above; ≤ 1.2% HW overshoot |
+| 6. y-tie approx | No (systematic bias ~10⁻⁵) | Unchanged |
+
+**CI endpoints:** no permutation tests are used. Source 5 does not exist
+for CI. Reducing n\_reps has no interaction with any permutation-related
+noise. The CI error budget (Part 2) depends only on n\_reps, n\_boot, and
+n\_cal — all correctly accounted for in the disk-optimized CI tier
+formulas.
+
+### Caveats
+
+1. **Cost linearity at scale.** The per-unit costs c\_sim and c\_cal are
+   extrapolated from benchmarks at n\_sims = 50, n\_cal = 300. At
+   n\_cal\_pre = 500,000, calibration arrays are ~320 MB per scenario
+   (shape 500,000 × 80), exceeding L3 cache. Memory-bandwidth effects
+   may increase effective c\_cal at large scale. This affects
+   **precompute time estimates only** — the precision-based n\_sims
+   reduction depends on C\_B and C\_K (precision constants), not cost
+   estimates.
+
+2. **Memory for parallel precompute.** Each worker holds ~640 MB–1 GB of
+   arrays at n\_cal\_pre = 500,000. With 4 workers: ~2.5–4 GB. Verify
+   available RAM before parallelizing at high n\_cal\_pre.
+
+3. **Cache key compatibility.** The calibration cache key includes n\_cal:
+   `(n, n_distinct, distribution_type, all_distinct, n_cal)`. Precomputed
+   entries at n\_cal\_pre = 500,000 are found only when the runtime
+   calibration call uses n\_cal = 500,000. If the disk cache is missing
+   (not loaded), calibration at n\_cal = 500,000 will compute from
+   scratch — extremely slow (~16 hrs sequential). Ensure the disk cache
+   is always loaded when using the optimized tiers.
+
+4. **Other error sources.** Reducing n\_sims / n\_reps affects sources 1
+   and 2 only. Null realization (source 3) and calibration interpolation
+   (source 4) are unchanged and must be managed independently. At
+   ±0.001, the null still requires n\_pre ≥ 500,000 regardless of disk
+   persistence (see Part 1). Permutation noise (source 5, MC fallback
+   only) has a slightly larger impact with disk optimization because
+   bisection accounts for a larger fraction of the variance budget — see
+   "Interaction with permutation noise" above for the full analysis. The
+   worst-case overshoot is ≤ 1.2% of the target HW and is absent in
+   the default (precomputed null) configuration.
+
+5. **Copula generator.** Copula calibration costs ~10× more per unit than
+   NP/empirical before the fast-path optimization. Precompute times for
+   copula are correspondingly higher. After the copula fast-path
+   optimization (replacing generate\_y\_copula with rank-equivalent z\_y
+   computation in the bisection loop), copula costs should approach
+   NP/empirical levels and the tables above become applicable.
 
 ---
 

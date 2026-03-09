@@ -282,6 +282,14 @@ N_SIMS_THRESHOLD_FOR_N_PERM = 5000
 # See AUDIT.md "Known Precision Limitations" for the full analysis.
 PVALUE_PRECOMPUTED_N_PRE = 50_000
 
+# Benchmark n_pre values for null cache cost scaling in benchmark scripts.
+# N_PRE_BENCH: n_pre used during benchmarking (matches PVALUE_PRECOMPUTED_N_PRE).
+# N_PRE_TIERS: adequate n_pre at each precision tier (+/-0.01, +/-0.002, +/-0.001).
+#   At +/-0.01: 50k is adequate (±0.0018 contribution).
+#   At +/-0.002/+/-0.001: 200k is just sufficient, 500k is comfortable.
+N_PRE_BENCH = PVALUE_PRECOMPUTED_N_PRE  # 50_000
+N_PRE_TIERS = (50_000, 200_000, 500_000)
+
 PVALUE_N_SIMS_BATCH_THRESHOLD = 5_000
 PVALUE_N_SIMS_CHUNK_SIZE = 2_000
 

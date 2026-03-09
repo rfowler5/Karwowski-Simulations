@@ -16,6 +16,75 @@ All three use the Bonett-Wright framework (SE in Fisher z-space, delta method ba
 
 ---
 
+## Coefficient dependencies
+
+| Coefficient | Depends on | Does NOT depend on |
+|---|---|---|
+| *k* (calibration) | n, probe ρ (fixed at 0.30) | n\_sims, n\_reps, observed ρ, ρ\*, generator, n\_boot |
+| *c* (bisection) | n, ρ\* (min detectable rho) | n\_sims, n\_cal, observed ρ, probe ρ, generator (analytical) |
+| *σ\_rep* (inter-rep) | n, observed ρ, tie structure (FHP) | n\_sims, n\_reps, n\_boot, ρ\*, probe ρ, generator |
+
+None of the three depends on n\_sims, n\_reps, or n\_boot. These simulation
+counts control how precisely the *outputs* are estimated, not the coefficients
+themselves. Sufficient simulation counts are needed only when estimating the
+coefficients *empirically* via the scripts; the analytical formulas bypass
+this entirely.
+
+### Only *c* requires a simulation output (ρ\*)
+
+*k* and *σ\_rep* can be computed from scenario parameters known before any
+simulation: n (sample size), observed ρ (from the data), and tie structure
+(from `config.CASES`). These are "compute once" quantities — run the
+analytical script and take the worst case.
+
+*c* requires ρ\* — the minimum detectable rho at 80% power — which is itself
+the main output of the power simulation. This creates a mild chicken-and-egg
+situation: you need *c* to size n\_sims, but you need ρ\* to compute *c*, and
+you need n\_sims to estimate ρ\*. The resolution is to start with a
+conservative analytical estimate and refine after a quick ±0.01 run (see
+"Step-by-step process" below).
+
+### *k* and multipoint calibration
+
+The calibration pipeline bisects independently at each of 5 probes
+\[0.10, 0.20, 0.30, 0.40, 0.50\]. Each probe has its own calibration noise
+level k\_probe = (1 − ρ\_probe²) √(1.06/(n−3)):
+
+| Probe ρ | (1 − ρ²) | k (n=73) | k (n=82) |
+|---|---|---|---|
+| 0.10 | 0.990 | 0.122 | 0.115 |
+| 0.20 | 0.960 | 0.118 | 0.111 |
+| **0.30** | **0.910** | **0.112** | **0.105** |
+| 0.40 | 0.840 | 0.103 | 0.097 |
+| 0.50 | 0.750 | 0.092 | 0.087 |
+
+For the **power** application (ρ\* ≈ 0.28–0.34), the relevant probes are 0.20
+and 0.40, and k ≈ 0.112 (at probe 0.30) is appropriate. For **CI** at small
+observed ρ (e.g. |ρ| ≈ 0.06), the relevant probe is 0.10 where k ≈ 0.122 —
+about 9% higher. The absolute ceiling is k\_max = √(1.06/(n−3)), the ρ → 0
+limit (0.123 for n=73).
+
+The benchmark default k = 0.112 is conservative for power but slightly
+underestimates calibration noise for CI at very small observed ρ. For a single
+conservative value covering all applications, use k at the lowest probe (0.10)
+or the ceiling √(1.06/(n\_min−3)).
+
+### *σ\_rep* and observed ρ
+
+*σ\_rep* depends on the observed ρ through the CI endpoint values: the endpoint
+closest to zero has the highest SD. The observed ρ is a property of the study
+data — it is read from `config.CASES[case_id]["observed_rho"]` and requires no
+user judgment. Running `estimate_interrep_sd.py --analytical --with-ties`
+reports *σ\_rep* for all cases; take the maximum.
+
+*σ\_rep* does **not** depend on n\_boot. The analytical formula does not involve
+n\_boot. When estimating *σ\_rep* empirically, the observed SD across
+replications includes a small bootstrap quantile noise component that inflates
+the estimate, but at n\_boot ≥ 500 this adds < 1.5% to the variance (see
+UNCERTAINTY\_BUDGET.md Part 2, "Universal bound").
+
+---
+
 ## Current data: all three coefficients are appropriate
 
 For the **current Karwowski-based setup** (n ≈ 73–82, tie structures in `config.CASES`, digitized B-Al/H-Al when using empirical):
@@ -96,36 +165,126 @@ So when you update a coefficient in `benchmark_precision_params.py`, only the co
 
 ---
 
-## What to do when data or tie structure changes
+## Step-by-step process: selecting constants for new data
 
-1. **Estimate coefficients for the new setup**  
-   - **Bisection *c*:** Run `scripts/estimate_bisection_c.py` for your scenario. Example:
-     ```bash
-     python scripts/estimate_bisection_c.py --case 3 --n-distinct 4 --dist-type heavy_center --generator nonparametric
-     python scripts/estimate_bisection_c.py --case 3 --generator empirical --n-sims 5000
-     ```
-     If you already have min detectable rho, pass it with `--rho`:
-     ```bash
-     python scripts/estimate_bisection_c.py --case 3 --rho 0.33 --n-sims 5000
-     ```
-   - **Calibration *k*:** `scripts/estimate_calibration_k.py --analytical` (instant) or without `--analytical` (empirical).
-   - **Inter-rep SD *σ_rep*:** `scripts/estimate_interrep_sd.py --analytical --with-ties` (instant) or without `--analytical` (empirical).
+### Step 1: Compute *k* and *σ\_rep* analytically (instant)
 
-2. **Recompute precision parameters**  
-   - Update `C_BISECTION`, `C_CAL`, and/or `SD_INTER_REP` in `benchmarks/benchmark_precision_params.py`, then run it to get the new `n_sims`, `n_cal`, `n_reps` for each tier.
+These two coefficients depend only on scenario parameters known before any
+simulation. Run:
 
-3. **Re-run benchmarks**  
-   - Run `benchmark_precision_params.py` (optional, for a clean summary).  
-   - Run `benchmark_realistic_runtimes.py` at **small params** (quick), then use the scaling formulas so runtimes reflect the new params. No need to run at full precision; quick then scale is enough.
+```bash
+python scripts/estimate_calibration_k.py --analytical
+python scripts/estimate_interrep_sd.py --analytical --with-ties
+```
 
-4. **Optional safety margin**  
-   - If you know ties are heavy but don't want to estimate precisely, use conservative values (e.g. c = 0.25–0.30, σ_rep = 0.15) and scale the corresponding `n_*` values.
+Take the worst case across all cases:
+
+- **k:** largest value (= smallest n, since k ∝ 1/√(n−3)).
+- **σ\_rep:** largest SD across all cases and endpoints.
+
+No user judgment is needed. The inputs (n, observed ρ, tie structure) come
+from `config.CASES`. These values are final — they do not change after
+simulation.
+
+### Step 2: Estimate *c* analytically with a conservative ρ\* guess (instant)
+
+The analytical formula for *c* requires ρ\* (the min detectable rho at 80%
+power). Before running any simulation, use a rough guess — either the default
+0.33 (current Karwowski data) or a rough estimate from the asymptotic power
+formula. Run:
+
+```bash
+python scripts/estimate_bisection_c.py --case 3 --rho 0.33 --analytical
+```
+
+The analytical (no-tie) formula is conservative: at any given ρ\*, it
+overestimates *c* because the actual tied power curve is steeper than the
+no-tie asymptotic (see "Competing factors with ties" above). This holds for
+all generators.
+
+**Choosing the conservative direction for ρ\*.** *c* increases monotonically
+with ρ\* in the relevant range (see table in "Heavier ties" above): a higher
+ρ\* gives a shallower power curve slope, hence larger *c*. To be conservative,
+round your ρ\* guess **up**, not down. If unsure, use 0.40 as a safe upper
+bound for moderate-n studies; the analytical *c* at ρ\* = 0.40 is 0.40
+(roughly 2× the current default), which would be very conservative but safe.
+
+### Step 3: Run a quick simulation at ±0.01 (minutes)
+
+Run the power analysis at the ±0.01 tier (n\_sims ≈ 2,220, using the *c* from
+Step 2). This gives the actual min detectable rho to ±0.01 precision and takes
+only minutes:
+
+```bash
+python benchmarks/benchmark_precision_params.py    # verify tier parameters
+# then run your power analysis at the ±0.01 tier
+```
+
+Compare the actual ρ\* against the value assumed in Step 2.
+
+- If the actual ρ\* is **within ~0.03** of your guess, the analytical *c* from
+  Step 2 is fine.
+- If the actual ρ\* is **substantially higher** (e.g. 0.05+ above your
+  guess), re-evaluate *c* analytically at the upper end of the ±0.01
+  confidence interval (ρ\* + 0.01), which is the conservative direction:
+
+```bash
+python scripts/estimate_bisection_c.py --case 3 --rho <rho_star_plus_0.01> --analytical
+```
+
+**Generator dependence.** The analytical *c* formula at a given ρ\* is
+generator-independent (it uses the no-tie asymptotic). However, the ρ\*
+output from the ±0.01 run **is** generator-dependent — different generators
+give slightly different power curves and hence slightly different min
+detectable rho. If you run multiple generators, use the **largest ρ\*** across
+generators for the most conservative *c*.
+
+### Step 4: Optional — empirical verification of *c*
+
+If the analytical *c* is close to the current default (0.17) and you want
+reassurance, run the empirical estimation at n\_sims ≥ 5,000:
+
+```bash
+python scripts/estimate_bisection_c.py --case 3 --n-sims 5000
+```
+
+The empirical *c* should be below the analytical value (the tied power curve
+is steeper). If it exceeds the analytical — which would indicate an unusual
+power curve shape — use the empirical value with a safety margin.
+
+This step is usually unnecessary: the analytical *c* is a reliable upper bound
+for moderate ties. It is most useful when tie structure is unusually heavy and
+the power curve shape might differ qualitatively from the no-tie asymptotic.
+
+### Step 5: Update constants and re-run benchmarks
+
+Update `C_BISECTION`, `C_CAL`, and `SD_INTER_REP` in
+`benchmarks/benchmark_precision_params.py` with the values from Steps 1–3
+(round up for conservatism). Then:
+
+```bash
+python benchmarks/benchmark_precision_params.py       # updated tier parameters
+python benchmarks/benchmark_realistic_runtimes.py     # updated runtime estimates (quick then scale)
+```
+
+### Quick-reference safety margins
+
+If you know ties are heavy but don't want to estimate precisely, use these
+conservative values and scale the corresponding n\_\* values:
+
+| Coefficient | Default | Conservative | Very conservative |
+|---|---|---|---|
+| *c* | 0.17 | 0.25 | 0.40 |
+| *k* | 0.112 | 0.122 | √(1.06/(n\_min−3)) |
+| *σ\_rep* | 0.13 | 0.15 | 0.18 |
 
 ---
 
 ## Summary
 
-| Situation                         | Action |
-|----------------------------------|--------|
-| Current Karwowski-based data    | c = 0.17, k = 0.112, σ_rep = 0.13 are all fine; no change. |
-| New data / heavier ties / different study | Re-estimate *c*, *k*, *σ_rep* via the three scripts; update `benchmark_precision_params.py`; re-run benchmarks (quick then scale). |
+| Situation | Action |
+|---|---|
+| Current Karwowski-based data | c = 0.17, k = 0.112, σ\_rep = 0.13 are all fine; no change needed. |
+| New data, similar n and ties | Run Steps 1–2 (instant). If *k* and *σ\_rep* are similar, likely no change. Check *c* at ±0.01 (Step 3) to confirm ρ\* is in range. |
+| New data, different n or heavier ties | Full Steps 1–5. *k* and *σ\_rep* update analytically (instant); *c* may need refinement after a quick ±0.01 run. |
+| Unsure / want safety | Use "Very conservative" column above; accept the higher n\_sims / n\_reps cost. |

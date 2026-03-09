@@ -35,6 +35,7 @@ import os
 import sys
 import time
 import argparse
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -43,7 +44,7 @@ _root = Path(__file__).resolve().parents[1]
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-from config import CASES, POWER_TIERS, CI_TIERS
+from config import CASES, POWER_TIERS, CI_TIERS, N_PRE_BENCH, N_PRE_TIERS
 from power_simulation import min_detectable_rho, run_all_scenarios
 from confidence_interval_calculator import bootstrap_ci_averaged, run_all_ci_scenarios
 from data_generator import digitized_available, warm_calibration_cache
@@ -214,46 +215,78 @@ def main():
     rho_obs = case["observed_rho"]
     y_params = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
 
-    # Warmup: JIT compilation + caches that should be warm for all timed runs
+    # Warmup: JIT compilation + caches that should be warm for all timed runs.
+    # n_cal=1 so warmup cache entries (key includes n_cal) are distinct from
+    # production entries at n_cal=N_CAL_BENCH — ensures all 88 production entries
+    # are timed from cold during the cache warmup below.
+    # We use n_cal=1 so warmup cache keys stay distinct from production (n_cal=N_CAL_BENCH).
+    # With n_cal=1 the bisection often hits the search boundary (too few samples to converge);
+    # that triggers a UserWarning. We suppress it here because the warmup is only for JIT
+    # compilation — we never use the warmup result. If you see the warning elsewhere it is
+    # harmless; it just means that run hit the boundary.
     print("Warming up (JIT + one small run per generator used)...")
-    if mode in ("power", "both"):
-        min_detectable_rho(
-            n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
-            generator=generator, n_sims=50, seed=0, direction="positive",
-            calibration_mode="multipoint", n_cal=N_CAL_BENCH)
-    if mode in ("ci", "both"):
-        bootstrap_ci_averaged(
-            n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, rho_obs, y_params,
-            generator=generator, n_reps=5, n_boot=10, seed=0,
-            batch_bootstrap=True, calibration_mode="multipoint")
-    if args.borrow_g_from and proxy != generator:
-        min_detectable_rho(
-            n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
-            generator=proxy, n_sims=50, seed=0, direction="positive",
-            calibration_mode="multipoint", n_cal=N_CAL_BENCH)
-        if mode in ("ci", "both") and proxy != "linear":
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if mode in ("power", "both"):
+            min_detectable_rho(
+                n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
+                generator=generator, n_sims=50, seed=0, direction="positive",
+                calibration_mode="multipoint", n_cal=1)
+        if mode in ("ci", "both"):
             bootstrap_ci_averaged(
                 n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, rho_obs, y_params,
-                generator=proxy, n_reps=5, n_boot=10, seed=0,
+                generator=generator, n_reps=5, n_boot=10, seed=0,
                 batch_bootstrap=True, calibration_mode="multipoint")
+        if args.borrow_g_from and proxy != generator:
+            min_detectable_rho(
+                n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
+                generator=proxy, n_sims=50, seed=0, direction="positive",
+                calibration_mode="multipoint", n_cal=1)
+            if mode in ("ci", "both") and proxy != "linear":
+                bootstrap_ci_averaged(
+                    n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, rho_obs, y_params,
+                    generator=proxy, n_reps=5, n_boot=10, seed=0,
+                    batch_bootstrap=True, calibration_mode="multipoint")
     print("Warmup done.")
 
     # Pre-warm caches for all 88 scenarios so grid runs measure simulation
-    # cost only, not one-time cache-building overhead.
+    # cost only, not one-time cache-building overhead.  Time both null and
+    # calibration so we can report cold-start costs in tier predictions.
     need_grid = (grid_n_sims or grid_ci_params)
+    t_null_build = None
+    t_cal_bench = None
     if need_grid:
         print("Warming null + calibration caches for all 88 scenarios...", flush=True)
-        warm_precomputed_null_cache(n_pre=50000, seed=args.seed)
+        t0 = time.perf_counter()
+        warm_precomputed_null_cache(n_pre=N_PRE_BENCH, seed=args.seed)
+        t_null_build = time.perf_counter() - t0
+        t0 = time.perf_counter()
         warm_calibration_cache(generator, y_params,
                                calibration_mode="multipoint",
                                n_cal=N_CAL_BENCH, seed=99)
+        t_cal_bench = time.perf_counter() - t0
         if args.borrow_g_from:
             warm_calibration_cache(proxy, y_params,
                                    calibration_mode="multipoint",
                                    n_cal=N_CAL_BENCH, seed=99)
+        print(f"  Null:          {t_null_build:.2f}s  "
+              f"(@+/-0.01 {_fmt_time_sec(t_null_build * N_PRE_TIERS[0] / N_PRE_BENCH)}, "
+              f"@+/-0.002 {_fmt_time_sec(t_null_build * N_PRE_TIERS[1] / N_PRE_BENCH)}, "
+              f"@+/-0.001 {_fmt_time_sec(t_null_build * N_PRE_TIERS[2] / N_PRE_BENCH)})")
+        print(f"  Calibration:   {t_cal_bench:.2f}s  "
+              f"(@+/-0.01 {_fmt_time_sec(t_cal_bench * POWER_TIERS[0][1] / N_CAL_BENCH)}, "
+              f"@+/-0.002 {_fmt_time_sec(t_cal_bench * POWER_TIERS[1][1] / N_CAL_BENCH)}, "
+              f"@+/-0.001 {_fmt_time_sec(t_cal_bench * POWER_TIERS[2][1] / N_CAL_BENCH)})")
+        print("  (Tier scaling: null × n_pre_tier/N_PRE_BENCH, cal × n_cal_tier/N_CAL_BENCH)")
         print("Caches warm.\n")
     else:
         print()
+
+    has_cold = (t_null_build is not None and t_cal_bench is not None)
+    # Outer-scope storage for tier sim times; populated inside power/CI blocks
+    # so the combined cold-start summary can reference both regardless of mode.
+    t_grid_power = [0.0, 0.0, 0.0]  # filled in power block
+    t_grid_ci = [0.0, 0.0, 0.0]     # filled in CI block
 
     # --- Power fit ---
     if mode in ("power", "both"):
@@ -371,7 +404,7 @@ def main():
             n_par_power = (grid_n_sims[0] if grid_n_sims else n_sims_list[0])
             if not (grid_n_sims or grid_ci_params):
                 print("Warming null + calibration caches before parallel grid run...", flush=True)
-                warm_precomputed_null_cache(n_pre=50000, seed=args.seed)
+                warm_precomputed_null_cache(n_pre=N_PRE_BENCH, seed=args.seed)
                 warm_calibration_cache(generator, y_params,
                                        calibration_mode="multipoint",
                                        n_cal=N_CAL_BENCH, seed=99)
@@ -390,27 +423,47 @@ def main():
 
         # Power tier predictions
         tier_labels = ["+/-0.01", "+/-0.002", "+/-0.001"]
-        print("Tier predictions:")
         has_grid_fit = (k_g is not None)
+        has_cold = (t_null_build is not None and t_cal_bench is not None)
+
+        print("Tier predictions (hot-cache simulation):")
         if has_grid_fit:
-            print("Tier       | Single scenario | Full grid (grid fit) | Full grid (single extrap)")
+            print("Tier       | Single (hot) | Grid fit (hot) | Grid extrap (hot)")
         else:
-            print("Tier       | Single scenario | Full grid (single extrap)")
-        print("-" * (78 if has_grid_fit else 55))
-        for i, (n_tier, _) in enumerate(POWER_TIERS):
+            print("Tier       | Single (hot) | Grid extrap (hot)")
+        print("-" * (65 if has_grid_fit else 45))
+        t_single_power = []
+        for i, (n_tier, n_cal_tier) in enumerate(POWER_TIERS):
             t_single = C + k * n_tier
             t_grid_extrap = N_GRID_SCENARIOS * t_single
-            single_str = f"{t_single:>12.0f}s" if t_single >= 0 else f"{'(neg)':>13}"
+            t_single_power.append(t_single)
+            t_grid_power[i] = t_grid_extrap
+            single_str = f"{_fmt_time_sec(t_single):>12}" if t_single >= 0 else f"{'(neg)':>12}"
             row = f"{tier_labels[i]:<10} | {single_str}"
             if has_grid_fit:
                 t_grid_fit = N_GRID_SCENARIOS * (C_g + k_g * n_tier)
-                fit_str = f"{t_grid_fit:>10.0f}s ({_fmt_time_sec(t_grid_fit):>8})" if t_grid_fit >= 0 else "(neg)"
-                ext_str = f"{t_grid_extrap:>10.0f}s ({_fmt_time_sec(t_grid_extrap):>8})" if t_grid_extrap >= 0 else "(neg)"
+                fit_str = f"{_fmt_time_sec(t_grid_fit):>14}" if t_grid_fit >= 0 else f"{'(neg)':>14}"
+                ext_str = f"{_fmt_time_sec(t_grid_extrap):>17}" if t_grid_extrap >= 0 else f"{'(neg)':>17}"
                 row += f" | {fit_str} | {ext_str}"
             else:
-                ext_str = f"{t_grid_extrap:>10.0f}s ({_fmt_time_sec(t_grid_extrap):>8})" if t_grid_extrap >= 0 else "(neg)"
+                ext_str = f"{_fmt_time_sec(t_grid_extrap):>18}" if t_grid_extrap >= 0 else f"{'(neg)':>18}"
                 row += f" | {ext_str}"
             print(row)
+
+        if has_cold:
+            print()
+            print("Cold-start tier predictions (simulation + null build + calibration build):")
+            print("Tier       | Single (cold) | Grid extrap (cold)")
+            print("-" * 45)
+            for i, (n_tier, n_cal_tier) in enumerate(POWER_TIERS):
+                null_cost = t_null_build * (N_PRE_TIERS[i] / N_PRE_BENCH)
+                cal_cost = t_cal_bench * (n_cal_tier / N_CAL_BENCH)
+                t_cold_single = t_single_power[i] + null_cost + cal_cost if t_single_power[i] >= 0 else -1
+                t_cold_grid = t_grid_power[i] + null_cost + cal_cost if t_grid_power[i] >= 0 else -1
+                single_str = f"{_fmt_time_sec(t_cold_single):>13}" if t_cold_single >= 0 else f"{'(neg)':>13}"
+                grid_str = f"{_fmt_time_sec(t_cold_grid):>18}" if t_cold_grid >= 0 else f"{'(neg)':>18}"
+                print(f"{tier_labels[i]:<10} | {single_str} | {grid_str}")
+            print("  cache = null × (n_pre_tier/N_PRE_BENCH) + cal × (n_cal_tier/N_CAL_BENCH)")
         print()
 
         # Multi-core extrapolation (power full grid)
@@ -556,7 +609,7 @@ def main():
             nr_par_ci, nb_par_ci = (grid_ci_params[0] if grid_ci_params else ci_params[0])
             if not (grid_n_sims or grid_ci_params):
                 print("Warming null + calibration caches before parallel CI grid run...", flush=True)
-                warm_precomputed_null_cache(n_pre=50000, seed=args.seed)
+                warm_precomputed_null_cache(n_pre=N_PRE_BENCH, seed=args.seed)
                 warm_calibration_cache(generator, y_params,
                                        calibration_mode="multipoint",
                                        n_cal=N_CAL_BENCH, seed=99)
@@ -576,27 +629,46 @@ def main():
         # CI tier predictions
         tier_labels_ci = ["+/-0.01", "+/-0.002", "+/-0.001"]
         has_grid_ci_fit = (k_g_ci is not None)
-        print("Tier predictions (CI):")
+
+        print("Tier predictions (CI, hot-cache simulation):")
         if has_grid_ci_fit:
-            print("Tier       | Single scenario | Full grid (grid fit) | Full grid (single extrap)")
+            print("Tier       | Single (hot) | Grid fit (hot) | Grid extrap (hot)")
         else:
-            print("Tier       | Single scenario | Full grid (single extrap)")
-        print("-" * (78 if has_grid_ci_fit else 55))
-        for i, (nr, nb) in enumerate(CI_TIERS):
+            print("Tier       | Single (hot) | Grid extrap (hot)")
+        print("-" * (65 if has_grid_ci_fit else 45))
+        t_single_ci = []
+        for i, (nr, nb, n_cal_tier_ci) in enumerate(CI_TIERS):
             prod = nr * nb
             t_single = C_ci + k_ci * prod
             t_grid_extrap = N_GRID_SCENARIOS * t_single
-            single_str = f"{t_single:>12.0f}s" if t_single >= 0 else f"{'(neg)':>13}"
+            t_single_ci.append(t_single)
+            t_grid_ci[i] = t_grid_extrap
+            single_str = f"{_fmt_time_sec(t_single):>12}" if t_single >= 0 else f"{'(neg)':>12}"
             row = f"{tier_labels_ci[i]:<10} | {single_str}"
             if has_grid_ci_fit:
                 t_grid_fit = N_GRID_SCENARIOS * (C_g_ci + k_g_ci * prod)
-                fit_str = f"{t_grid_fit:>10.0f}s ({_fmt_time_sec(t_grid_fit):>8})" if t_grid_fit >= 0 else "(neg)"
-                ext_str = f"{t_grid_extrap:>10.0f}s ({_fmt_time_sec(t_grid_extrap):>8})" if t_grid_extrap >= 0 else "(neg)"
+                fit_str = f"{_fmt_time_sec(t_grid_fit):>14}" if t_grid_fit >= 0 else f"{'(neg)':>14}"
+                ext_str = f"{_fmt_time_sec(t_grid_extrap):>17}" if t_grid_extrap >= 0 else f"{'(neg)':>17}"
                 row += f" | {fit_str} | {ext_str}"
             else:
-                ext_str = f"{t_grid_extrap:>10.0f}s ({_fmt_time_sec(t_grid_extrap):>8})" if t_grid_extrap >= 0 else "(neg)"
+                ext_str = f"{_fmt_time_sec(t_grid_extrap):>18}" if t_grid_extrap >= 0 else f"{'(neg)':>18}"
                 row += f" | {ext_str}"
             print(row)
+
+        if has_cold:
+            print()
+            print("Cold-start tier predictions CI (simulation + null build + calibration build):")
+            print("Tier       | Single (cold) | Grid extrap (cold)")
+            print("-" * 45)
+            for i, (nr, nb, n_cal_tier_ci) in enumerate(CI_TIERS):
+                null_cost = t_null_build * (N_PRE_TIERS[i] / N_PRE_BENCH)
+                cal_cost = t_cal_bench * (n_cal_tier_ci / N_CAL_BENCH)
+                t_cold_single = t_single_ci[i] + null_cost + cal_cost if t_single_ci[i] >= 0 else -1
+                t_cold_grid = t_grid_ci[i] + null_cost + cal_cost if t_grid_ci[i] >= 0 else -1
+                single_str = f"{_fmt_time_sec(t_cold_single):>13}" if t_cold_single >= 0 else f"{'(neg)':>13}"
+                grid_str = f"{_fmt_time_sec(t_cold_grid):>18}" if t_cold_grid >= 0 else f"{'(neg)':>18}"
+                print(f"{tier_labels_ci[i]:<10} | {single_str} | {grid_str}")
+            print("  cache = null × (n_pre_tier/N_PRE_BENCH) + cal × (n_cal_tier/N_CAL_BENCH)")
         print()
 
         # Multi-core extrapolation (CI full grid)
@@ -606,7 +678,7 @@ def main():
             print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
             print("-" * 55)
             prod_par = nr_par_ci * nb_par_ci
-            for i, (nr_tier, nb_tier) in enumerate(CI_TIERS):
+            for i, (nr_tier, nb_tier, _) in enumerate(CI_TIERS):
                 prod_tier = nr_tier * nb_tier
                 T_par_tier = T_par_ci_measured * (prod_tier / prod_par)
                 e4 = T_par_tier * (logical_cores / 4) / EFFICIENCY
@@ -619,7 +691,7 @@ def main():
             print("  Run with --grid-parallel for measured n_jobs=-1 and reliable extrapolation.")
             print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
             print("-" * 55)
-            for i, (nr_tier, nb_tier) in enumerate(CI_TIERS):
+            for i, (nr_tier, nb_tier, _) in enumerate(CI_TIERS):
                 prod_tier = nr_tier * nb_tier
                 if has_grid_ci_fit:
                     t_seq = N_GRID_SCENARIOS * (C_g_ci + k_g_ci * prod_tier)
@@ -634,6 +706,32 @@ def main():
                     print(f"{tier_labels_ci[i]:<10} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
             print()
 
+    # Combined cold-start block (only when both power and CI were fitted)
+    if mode == "both" and has_cold:
+        tier_labels_both = ["+/-0.01", "+/-0.002", "+/-0.001"]
+        print("=== Cold-start summary: single run vs separate runs (this generator) ===")
+        print('  "Single run"  = power then CI in one process — cache built once, shared.')
+        print('  "Two runs"    = power and CI in separate processes — cache built twice each.')
+        print()
+        print(f"  {'Tier':<9} | {'Single run (cold)':>18} | {'Power-only (cold)':>18} | {'CI-only (cold)':>15} | {'Sum (two runs)':>15}")
+        print("  " + "-" * 80)
+        for i in range(3):
+            n_cal_p = POWER_TIERS[i][1]
+            n_cal_c = CI_TIERS[i][2]
+            null_cost = t_null_build * (N_PRE_TIERS[i] / N_PRE_BENCH)
+            cal_cost = t_cal_bench * (n_cal_p / N_CAL_BENCH)
+            # Use grid extrap as the reference simulation cost (most relevant for production)
+            t_p_sim = t_grid_power[i] if t_grid_power[i] >= 0 else 0
+            t_c_sim = t_grid_ci[i] if t_grid_ci[i] >= 0 else 0
+            cal_cost_ci = t_cal_bench * (n_cal_c / N_CAL_BENCH)
+            t_single_run = t_p_sim + t_c_sim + null_cost + cal_cost
+            t_pow_only = t_p_sim + null_cost + cal_cost
+            t_ci_only = t_c_sim + null_cost + cal_cost_ci
+            t_two_runs = t_pow_only + t_ci_only
+            print(f"  {tier_labels_both[i]:<9} | {_fmt_time_sec(t_single_run):>18} | {_fmt_time_sec(t_pow_only):>18} | {_fmt_time_sec(t_ci_only):>15} | {_fmt_time_sec(t_two_runs):>15}")
+        print("  (Simulation = full grid extrap. Cache = null + calibration at tier n_pre / n_cal.)")
+        print()
+
     # Notes footer
     print("Notes:")
     print("  - T(n) = C + k*n: single-scenario model. C = fixed overhead, k = per-sim cost.")
@@ -641,7 +739,10 @@ def main():
     print("    k_g > k when the grid-average scenario is harder than case 3 (typical).")
     print("  - Without --grid-n-sims, 'single extrap' = 88*(C + k*n) (assumes all scenarios ~ case 3).")
     print("  - R^2 < 0.99 suggests measurement noise; re-run with --repeats 3 and/or larger n_sims.")
-    print("  - Null + calibration caches are pre-warmed before grid runs for consistent timings.")
+    print("  - Null + calibration caches are pre-warmed before grid runs; cold-start columns above")
+    print("    show the full first-run cost including cache build at each tier's n_pre / n_cal.")
+    print("  - Grid par cold-cache: workers spawn fresh — each rebuilds calibration and null.")
+    print("    Parallel would match sequential hot if workers loaded disk-precomputed caches.")
     print("  - Multi-core: without --grid-parallel, 4/8/16-core estimates are ROUGH (sequential/P/0.5).")
     print("    Use --grid-parallel to run the grid with n_jobs=-1 once for measured extrapolation.")
 

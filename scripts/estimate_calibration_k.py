@@ -27,6 +27,13 @@ Usage:
 With different data: use the case that matches your n (or pass --n directly with
 --analytical), then run this script. Use the reported k in
 benchmarks/benchmark_precision_params.py (C_CAL) and re-run benchmark scripts.
+
+Dependencies: k depends on n and probe rho (fixed at 0.30 by default). It does
+NOT depend on n_sims, n_reps, observed rho, rho*, generator, or n_boot. The
+analytical formula is instant and stable; the empirical mode needs sufficient
+n_cal/replications for estimation accuracy, but the true k is unchanged. With
+multipoint calibration, k varies by probe (lowest probe = largest k); see
+docs/PRECISION_WHEN_DATA_CHANGES.md "Coefficient dependencies" for details.
 """
 
 import math
