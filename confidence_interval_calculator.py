@@ -290,7 +290,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
     elif generator == "copula":
         cal_rho = calibrate_rho_copula(
             n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal)
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+            calibration_mode=calibration_mode)
     elif generator == "empirical":
         pool = get_pool(n)
         cal_rho = calibrate_rho_empirical(

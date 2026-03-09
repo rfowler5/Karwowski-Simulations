@@ -216,43 +216,49 @@ def run():
         print(f"  (Tier columns = t_cal_build[gen] × (n_cal_tier / N_CAL_BENCH), linear scaling)\n")
 
     # --- Power: single (seq), grid seq, grid par ---
+    # With n_sims=N_SIMS_BENCH (50), bisection can hit the search boundary by chance
+    # (lucky seed gives power >= target at rho=0.25). We suppress the boundary
+    # UserWarning here because this run is for timing only — accuracy is not the goal.
+    # In production (n_sims from POWER_TIERS), the warning remains active.
     power_single = {}
     power_grid_seq = {}
     power_grid_par = {}
 
-    for gen in power_gens:
-        print(f"Power [{gen}] single scenario (seq)...", end=" ", flush=True)
-        t0 = time.perf_counter()
-        min_detectable_rho(
-            n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
-            generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, direction="positive",
-            calibration_mode="multipoint", n_cal=N_CAL_BENCH)
-        power_single[gen] = time.perf_counter() - t0
-        print(f"{power_single[gen]:.2f}s")
-
-    if not args.quick:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
         for gen in power_gens:
-            print(f"Power [{gen}] full grid seq...", end=" ", flush=True)
+            print(f"Power [{gen}] single scenario (seq)...", end=" ", flush=True)
             t0 = time.perf_counter()
-            run_all_scenarios(
-                generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, n_jobs=1,
+            min_detectable_rho(
+                n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, y_params,
+                generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, direction="positive",
                 calibration_mode="multipoint", n_cal=N_CAL_BENCH)
-            power_grid_seq[gen] = time.perf_counter() - t0
-            print(f"{power_grid_seq[gen]:.2f}s")
+            power_single[gen] = time.perf_counter() - t0
+            print(f"{power_single[gen]:.2f}s")
 
-        if not args.skip_parallel:
+        if not args.quick:
             for gen in power_gens:
-                print(f"Power [{gen}] full grid par...", end=" ", flush=True)
+                print(f"Power [{gen}] full grid seq...", end=" ", flush=True)
                 t0 = time.perf_counter()
                 run_all_scenarios(
-                    generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, n_jobs=-1,
+                    generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, n_jobs=1,
                     calibration_mode="multipoint", n_cal=N_CAL_BENCH)
-                power_grid_par[gen] = time.perf_counter() - t0
-                print(f"{power_grid_par[gen]:.2f}s")
-    else:
-        for gen in power_gens:
-            power_grid_seq[gen] = 0.0
-            power_grid_par[gen] = 0.0
+                power_grid_seq[gen] = time.perf_counter() - t0
+                print(f"{power_grid_seq[gen]:.2f}s")
+
+            if not args.skip_parallel:
+                for gen in power_gens:
+                    print(f"Power [{gen}] full grid par...", end=" ", flush=True)
+                    t0 = time.perf_counter()
+                    run_all_scenarios(
+                        generator=gen, n_sims=N_SIMS_BENCH, seed=SEED, n_jobs=-1,
+                        calibration_mode="multipoint", n_cal=N_CAL_BENCH)
+                    power_grid_par[gen] = time.perf_counter() - t0
+                    print(f"{power_grid_par[gen]:.2f}s")
+        else:
+            for gen in power_gens:
+                power_grid_seq[gen] = 0.0
+                power_grid_par[gen] = 0.0
 
     # --- CI: single (seq), grid seq, grid par ---
     ci_single = {}
@@ -315,24 +321,45 @@ def run():
 
     t_cal_all = sum(t_cal_build.values())
 
+    # Estimated cold-cache wall time in one parallel run.
+    # Workers split 88 scenarios across logical_cores processes; each worker builds cache
+    # for its share (~88 / n_workers scenarios) concurrently.  Wall time for cache inside
+    # the parallel run ≈ (total cache time) / n_workers.
+    # This is subtracted from the measured parallel time before linear scaling, so that
+    # tier projections represent simulation-only (hot-cache) cost and stay comparable to
+    # the hot-sequential case where cache was pre-warmed before the clock started. 
+    t_cache_par_bench = (t_cal_all + t_null_build) / logical_cores
+
     def null_scaled(tier_i):
         return t_null_build * (N_PRE_TIERS[tier_i] / N_PRE_BENCH)
 
     def cal_scaled(n_cal_tgt):
         return t_cal_all * (n_cal_tgt / N_CAL_BENCH)
 
-    power_scaled = [scale_power(power_best_tot, POWER_TIERS[i][0], POWER_TIERS[i][1])
+    # When parallel wins, the measured time includes cold-cache overhead that does not
+    # scale with n_sims / n_reps.  Subtract the estimated cache wall time before scaling.
+    # When sequential wins it is already hot-cache, so no correction is needed.
+    power_sim_for_scaling = (max(power_grid_par_tot - t_cache_par_bench, 0.0)
+                             if power_best_is_par else power_best_tot)
+    ci_sim_for_scaling    = (max(ci_grid_par_tot    - t_cache_par_bench, 0.0)
+                             if ci_best_is_par    else ci_best_tot)
+
+    power_scaled = [scale_power(power_sim_for_scaling, POWER_TIERS[i][0], POWER_TIERS[i][1])
                     for i in range(3)]
-    ci_scaled = [scale_ci(ci_best_tot, CI_TIERS[i][0], CI_TIERS[i][1])
+    ci_scaled = [scale_ci(ci_sim_for_scaling, CI_TIERS[i][0], CI_TIERS[i][1])
                  for i in range(3)]
     combined_scaled = [power_scaled[i] + ci_scaled[i] for i in range(3)]
 
-    # High-core estimates (power only, using parallel time if it was measured and wins)
+    # High-core estimates (power only, using parallel time if it was measured and wins).
+    # Cache cost at N target cores: (t_cal_all + t_null_build) / N (workers share scenarios).
+    # Simulation scales as power_sim_for_scaling * (this_cores / N) / efficiency.
     if not args.quick and not args.skip_parallel and power_best_is_par and power_grid_par_tot > 0:
-        est_8 = power_grid_par_tot * (logical_cores / 8) / EFFICIENCY + ci_best_tot
-        est_16 = power_grid_par_tot * (logical_cores / 16) / EFFICIENCY + ci_best_tot
-        est_8_scaled = [power_grid_par_tot * (logical_cores / 8) / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + ci_scaled[i] for i in range(3)]
-        est_16_scaled = [power_grid_par_tot * (logical_cores / 16) / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + ci_scaled[i] for i in range(3)]
+        t_cache_8  = (t_cal_all + t_null_build) / 8
+        t_cache_16 = (t_cal_all + t_null_build) / 16
+        est_8  = power_sim_for_scaling * (logical_cores / 8)  / EFFICIENCY + t_cache_8  + ci_sim_for_scaling
+        est_16 = power_sim_for_scaling * (logical_cores / 16) / EFFICIENCY + t_cache_16 + ci_sim_for_scaling
+        est_8_scaled  = [power_sim_for_scaling * (logical_cores / 8)  / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_8  + ci_scaled[i] for i in range(3)]
+        est_16_scaled = [power_sim_for_scaling * (logical_cores / 16) / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_16 + ci_scaled[i] for i in range(3)]
     else:
         est_8 = est_16 = None
         est_8_scaled = est_16_scaled = [None] * 3
@@ -349,13 +376,17 @@ def run():
             single_s = f"{power_single[gen]:.2f}s"
             gs = f"{power_grid_seq[gen]:.2f}s" if not args.quick else "-"
             gp = f"{power_grid_par.get(gen, 0):.2f}s" if not args.quick and not args.skip_parallel else "-"
-            best_per_gen = min(power_grid_seq[gen], power_grid_par.get(gen, float("inf"))) if not args.skip_parallel and not args.quick else power_grid_seq[gen]
+            _par_g = power_grid_par.get(gen, float("inf"))
+            _seq_g = power_grid_seq[gen]
+            best_per_gen = min(_seq_g, _par_g) if not args.skip_parallel and not args.quick else _seq_g
+            _par_wins_g = (not args.skip_parallel and not args.quick and _par_g < _seq_g)
+            sim_for_scaling_g = (max(_par_g - t_cache_par_bench, 0.0) if _par_wins_g else best_per_gen)
             if args.quick:
                 scale_01 = scale_002 = scale_001 = "-"
             else:
-                s1 = scale_power(best_per_gen, POWER_TIERS[0][0], POWER_TIERS[0][1])
-                s2 = scale_power(best_per_gen, POWER_TIERS[1][0], POWER_TIERS[1][1])
-                s3 = scale_power(best_per_gen, POWER_TIERS[2][0], POWER_TIERS[2][1])
+                s1 = scale_power(sim_for_scaling_g, POWER_TIERS[0][0], POWER_TIERS[0][1])
+                s2 = scale_power(sim_for_scaling_g, POWER_TIERS[1][0], POWER_TIERS[1][1])
+                s3 = scale_power(sim_for_scaling_g, POWER_TIERS[2][0], POWER_TIERS[2][1])
                 scale_01 = _fmt_time_sec(s1)
                 scale_002 = _fmt_time_sec(s2)
                 scale_001 = _fmt_time_sec(s3)
@@ -369,6 +400,7 @@ def run():
         print(f"{'ALL GENERATORS':<15} | {tot_single:>12} | {tot_gs:>8} | {tot_gp:>8} | {tot_01:>12} | {tot_002:>13} | {tot_001:>12}")
         print("    Single = single scenario, n_jobs=1. Grid seq = full grid, n_jobs=1. Grid par = full grid, n_jobs=-1.")
         print("    Scaled columns use whichever of seq/par is faster on this machine (noted below table).")
+        print("    When par wins, estimated cold-cache wall time is subtracted before scaling (see Notes).")
         print()
 
     if ci_gens:
@@ -380,13 +412,17 @@ def run():
             single_s = f"{ci_single[gen]:.2f}s"
             gs = f"{ci_grid_seq[gen]:.2f}s" if not args.quick else "-"
             gp = f"{ci_grid_par.get(gen, 0):.2f}s" if not args.quick and not args.skip_parallel else "-"
-            best_per_gen = min(ci_grid_seq[gen], ci_grid_par.get(gen, float("inf"))) if not args.skip_parallel and not args.quick else ci_grid_seq[gen]
+            _par_g = ci_grid_par.get(gen, float("inf"))
+            _seq_g = ci_grid_seq[gen]
+            best_per_gen = min(_seq_g, _par_g) if not args.skip_parallel and not args.quick else _seq_g
+            _par_wins_g = (not args.skip_parallel and not args.quick and _par_g < _seq_g)
+            sim_for_scaling_g = (max(_par_g - t_cache_par_bench, 0.0) if _par_wins_g else best_per_gen)
             if args.quick:
                 scale_01 = scale_002 = scale_001 = "-"
             else:
-                s1 = scale_ci(best_per_gen, CI_TIERS[0][0], CI_TIERS[0][1])
-                s2 = scale_ci(best_per_gen, CI_TIERS[1][0], CI_TIERS[1][1])
-                s3 = scale_ci(best_per_gen, CI_TIERS[2][0], CI_TIERS[2][1])
+                s1 = scale_ci(sim_for_scaling_g, CI_TIERS[0][0], CI_TIERS[0][1])
+                s2 = scale_ci(sim_for_scaling_g, CI_TIERS[1][0], CI_TIERS[1][1])
+                s3 = scale_ci(sim_for_scaling_g, CI_TIERS[2][0], CI_TIERS[2][1])
                 scale_01 = _fmt_time_sec(s1)
                 scale_002 = _fmt_time_sec(s2)
                 scale_001 = _fmt_time_sec(s3)
@@ -398,6 +434,7 @@ def run():
         tot_001 = _fmt_time_sec(ci_scaled[2]) if not args.quick else "-"
         print(f"{'ALL GENERATORS':<15} | {'-':>12} | {tot_gs:>8} | {tot_gp:>8} | {tot_01:>12} | {tot_002:>13} | {tot_001:>12}")
         print("    Scaled columns use whichever of seq/par is faster on this machine.")
+        print("    When par wins, estimated cold-cache wall time is subtracted before scaling (see Notes).")
         print()
 
     if power_gens and ci_gens:
@@ -421,8 +458,13 @@ def run():
         if args.quick:
             print("    Power best: -. CI best: -. (Run without --quick for full grid and best-config summary.)")
         else:
-            print(f"    Power best: {pw_best} ({_fmt_time_sec(power_best_tot)}). CI best: {ci_best_str} ({_fmt_time_sec(ci_best_tot)}).")
-        print("    Higher-core scaling (power only, if par wins): est_time = power_par_time * (this_cores / target_cores) / efficiency.")
+            pw_note = (f" (sim-only: {_fmt_time_sec(power_sim_for_scaling)}, after subtracting ~{_fmt_time_sec(t_cache_par_bench)} est. cache)"
+                       if power_best_is_par else "")
+            ci_note  = (f" (sim-only: {_fmt_time_sec(ci_sim_for_scaling)}, after subtracting ~{_fmt_time_sec(t_cache_par_bench)} est. cache)"
+                       if ci_best_is_par else "")
+            print(f"    Power best: {pw_best} ({_fmt_time_sec(power_best_tot)}){pw_note}.")
+            print(f"    CI best: {ci_best_str} ({_fmt_time_sec(ci_best_tot)}){ci_note}.")
+        print("    Higher-core scaling (power only, if par wins): sim scaled by (this_cores / target_cores) / efficiency; cache scaled by 1 / target_cores.")
         print("    CI with batch bootstrap: if seq is faster at small params, parallel may still win at high n_reps (see one-off benchmark).")
         print()
 
@@ -493,8 +535,12 @@ def run():
     print("    Parallel would match hot-seq if workers loaded disk-precomputed caches at startup.")
     print("  - Cold-start cache cost scales with n_cal (calibration) and n_pre (null) at each tier.")
     print("    Use --show-cache-costs for a per-generator breakdown.")
-    print("  - Power parallel scaling to N cores: (sequential_time / N) / 0.5. This assumes joblib overhead is amortized on larger machines.")
-    print("  - CI with batch bootstrap: parallel is often slower than sequential on this machine (joblib overhead ~89%, thread oversubscription ~11%).")
+    print("  - Scaled tier columns: represent hot-cache simulation time, so cache is not double-counted")
+    print("    when the Cold-start table is added. When par wins, estimated cold-cache wall time")
+    print(f"    (~(t_cal + t_null) / n_workers ≈ {_fmt_time_sec(t_cache_par_bench)} at bench params) is subtracted before scaling.")
+    print("    This removes the fixed overhead that would otherwise be scaled up linearly (~20% overestimate at ±0.001).")
+    print("  - Power parallel scaling to N cores: sim scaled by (this_cores / N) / 0.5; cache by 1/N (workers split scenarios).")
+    print("  - CI with batch bootstrap: parallel is often slower than sequential on this machine (joblib overhead + cold-cache in workers).")
     print("  - On higher-core machines with very high n_reps, the per-scenario time may be large enough for parallel to help; benchmark on your machine.")
 
 

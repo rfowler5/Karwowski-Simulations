@@ -695,6 +695,91 @@ def _eval_mean_rho_fast(rho_in, s_x, s_n, x_ranks_batch):
     return float(np.mean(rhos))
 
 
+def _precompute_calibration_arrays_copula(template, n_cal, seed):
+    """Precompute rho-independent arrays for Gaussian copula calibration.
+
+    Exploits rank(y) = rank(z_y) for continuous (tie-free) lognormal y:
+    since y = exp(mu + sigma*z_y) is strictly increasing, ordering is
+    preserved and y_params are not needed during calibration.
+
+    Returns (z_x_batch, noise_batch, x_ranks_batch).
+      z_x_batch   : (n_cal, n) normal quantiles derived from x ranks + jitter
+      noise_batch : (n_cal, n) iid standard normal draws (rho-independent)
+      x_ranks_batch : (n_cal, n) midranks of x (for Pearson-on-ranks)
+    """
+    cal_rng = np.random.default_rng(seed)
+    n = len(template)
+
+    x_batch = np.tile(template, (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        x_batch = cal_rng.permuted(x_batch, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        x_batch = np.take_along_axis(x_batch, perm, axis=1)
+
+    x_ranks_batch = _rank_rows(x_batch)
+
+    # Copula x-transform: midranks → uniform → normal (with tie-breaking jitter)
+    u_x = (x_ranks_batch - 0.5) / n
+    u_x = np.clip(u_x + cal_rng.normal(0, 1e-6, (n_cal, n)), 1e-8, 1 - 1e-8)
+    z_x_batch = norm.ppf(u_x)
+
+    # Independent standard normal noise (the epsilon term in z_y)
+    noise_batch = cal_rng.standard_normal((n_cal, n))
+
+    return z_x_batch, noise_batch, x_ranks_batch
+
+
+def _eval_mean_rho_copula_fast(rho_in, z_x_batch, noise_batch, x_ranks_batch):
+    """Fast mean Spearman rho for the Gaussian copula exploiting rank(y) = rank(z_y).
+
+    Since y = exp(mu + sigma*z_y) is strictly increasing, rank(y) = rank(z_y),
+    so Spearman(x, y) = Spearman(x, z_y).  No norm.cdf, lognormal quantile,
+    or y_params needed.
+    """
+    rho_p = _spearman_to_pearson(np.clip(rho_in, -0.999, 0.999))
+    z_y = rho_p * z_x_batch + np.sqrt(max(1.0 - rho_p ** 2, 0.0)) * noise_batch
+    ry = _rank_rows(z_y)
+    rhos = _pearson_on_rank_arrays(x_ranks_batch, ry)
+    return float(np.mean(rhos))
+
+
+def _bisect_for_probe_copula(probe, template, n_cal, seed,
+                              n_iter=25, tol=5e-5):
+    """Bisect to find rho_in such that E[Spearman_copula(rho_in)] ≈ probe.
+
+    Precomputes rho-independent arrays once (z_x, noise), then calls
+    _eval_mean_rho_copula_fast for each bisection step (~27×).
+    Returns rho_in (float) or None if the probe is unreachable.
+    """
+    arrays = _precompute_calibration_arrays_copula(template, n_cal, seed)
+
+    lo, hi = 0.0, min(probe * 2.0, 0.999)
+    val_hi = _eval_mean_rho_copula_fast(hi, *arrays)
+    if val_hi < probe:
+        hi = 0.999
+        val_hi = _eval_mean_rho_copula_fast(hi, *arrays)
+    if val_hi < probe:
+        return None  # unreachable
+
+    for _ in range(n_iter):
+        mid = (lo + hi) / 2.0
+        observed = _eval_mean_rho_copula_fast(mid, *arrays)
+        if observed < probe:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+
+    # Return the endpoint whose evaluated mean_rho is closer to the probe.
+    # Consistent with _bisect_for_probe: avoids midpoint landing on the wrong
+    # plateau when step discontinuities are present (heavily tied x).
+    val_lo = _eval_mean_rho_copula_fast(lo, *arrays)
+    val_hi = _eval_mean_rho_copula_fast(hi, *arrays)
+    return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
+
+
 def _mean_rho_vec(rho_in, template, y_params, n_cal, seed):
     """Vectorized mean realised Spearman rho: replaces the n_cal Python loop
     with a single batch of matrix operations.
@@ -847,6 +932,56 @@ def _calibrate_rho_multipoint(n, n_distinct, distribution_type, rho_target,
     return float(np.clip(sign * result, -0.999, 0.999))
 
 
+_CALIBRATION_CACHE_MULTIPOINT_COPULA = {}
+# Uses the same 5 probes as nonparametric multipoint: max interpolation
+# error < 0.0004 in [0.25, 0.42] (the bisection search range).
+
+
+def _calibrate_rho_multipoint_copula(n, n_distinct, distribution_type, rho_target,
+                                      all_distinct=False, n_cal=300,
+                                      seed=99, freq_dict=None):
+    """Multi-point calibration for the Gaussian copula: probe at 5 rho values, interpolate.
+
+    Cache key excludes y_params: rank(y) = rank(z_y) for continuous lognormal y,
+    so the calibration curve depends only on (n, template, seed, n_cal).
+    """
+    cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal,
+                 "multipoint")
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_MULTIPOINT_COPULA:
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                    freq_dict, all_distinct)
+        pairs = []
+        for probe in _MULTIPOINT_PROBES:
+            rho_in = _bisect_for_probe_copula(probe, template, n_cal, seed)
+            if rho_in is not None:
+                pairs.append((probe, rho_in))
+
+        _CALIBRATION_CACHE_MULTIPOINT_COPULA[cache_key] = pairs
+
+    pairs = sorted(_CALIBRATION_CACHE_MULTIPOINT_COPULA[cache_key], key=lambda p: p[0])
+
+    if not pairs:
+        return float(np.clip(rho_target, -0.999, 0.999))
+
+    abs_target = abs(rho_target)
+    sign = 1.0 if rho_target >= 0 else -1.0
+
+    if len(pairs) == 1:
+        probe, rho_in = pairs[0]
+        ratio = rho_in / probe
+        result = abs_target * ratio
+    else:
+        probes = [p for p, _ in pairs]
+        rho_ins = [r for _, r in pairs]
+        result = _interp_with_extrapolation(abs_target, probes, rho_ins)
+
+    return float(np.clip(sign * result, -0.999, 0.999))
+
+
 def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
                   all_distinct=False, n_cal=300, seed=99, freq_dict=None,
                   calibration_mode="multipoint"):
@@ -955,18 +1090,27 @@ _CALIBRATION_CACHE_COPULA = {}
 
 
 def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
-                         all_distinct=False, n_cal=300, seed=99, freq_dict=None):
+                         all_distinct=False, n_cal=300, seed=99, freq_dict=None,
+                         calibration_mode="multipoint"):
     """Find the input rho_s for the copula that produces E[Spearman] = rho_target.
 
-    Uses the same rho-independent attenuation approach as calibrate_rho:
-    bisection at probe rho=0.30 to compute a ratio, cached per (n, k, dist_type),
-    then applied as rho_in = rho_target * ratio.
+    Uses the fast-path calibration: precomputes z_x and noise once (rho-
+    independent), then bisects using only _eval_mean_rho_copula_fast at each
+    step — no generate_y_copula calls in the calibration loop.
+
+    Valid because rank(y) = rank(z_y) for lognormal y: y = exp(mu + sigma*z_y)
+    is strictly increasing, so Spearman(x, y) = Spearman(x, z_y).
 
     Parameters
     ----------
+    y_params : dict
+        Retained for API compatibility (not used in the fast calibration path).
     freq_dict : dict or None
         Custom frequency dictionary.  When provided, must contain
         freq_dict[n][n_distinct]["custom"] = list of counts.
+    calibration_mode : str
+        "multipoint" (default) probes at 5 rho values and interpolates;
+        "single" bisects at probe rho=0.30 and applies a linear ratio.
 
     Returns
     -------
@@ -976,6 +1120,13 @@ def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
     if abs(rho_target) < 1e-12:
         return 0.0
 
+    if calibration_mode == "multipoint":
+        return _calibrate_rho_multipoint_copula(
+            n, n_distinct, distribution_type, rho_target,
+            all_distinct=all_distinct, n_cal=n_cal, seed=seed,
+            freq_dict=freq_dict)
+
+    # --- single-point fast path ---
     cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal)
     if freq_dict is not None:
         counts = tuple(freq_dict[n][n_distinct]["custom"])
@@ -983,41 +1134,11 @@ def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
 
     if cache_key not in _CALIBRATION_CACHE_COPULA:
         probe = 0.30
-
         template = _get_x_template(n, n_distinct, distribution_type,
                                     freq_dict, all_distinct)
-
-        def _mean_rho(rho_in):
-            cal_rng = np.random.default_rng(seed)
-            total = 0.0
-            for _ in range(n_cal):
-                x = template.copy()
-                cal_rng.shuffle(x)
-                x_ranks = rankdata(x, method="average")
-                y = generate_y_copula(x, rho_in, y_params, rng=cal_rng)
-                total += _fast_spearman(x_ranks, y)
-            return total / n_cal
-
-        lo, hi = 0.0, min(probe * 2.0, 0.999)
-        if _mean_rho(hi) < probe:
-            hi = 0.999
-
-        for _ in range(25):
-            mid = (lo + hi) / 2.0
-            observed = _mean_rho(mid)
-            if observed < probe:
-                lo = mid
-            else:
-                hi = mid
-            if hi - lo < 5e-5:
-                break
-
-        # Return the endpoint whose _mean_rho is closer to probe.
-        # Copula steps are expected to be small, but this makes the
-        # pattern consistent across all calibration bisections.
-        val_lo = _mean_rho(lo)
-        val_hi = _mean_rho(hi)
-        calibrated_probe = hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
+        calibrated_probe = _bisect_for_probe_copula(probe, template, n_cal, seed)
+        if calibrated_probe is None:
+            calibrated_probe = probe
         ratio = calibrated_probe / probe if probe > 0 else 1.0
         _CALIBRATION_CACHE_COPULA[cache_key] = ratio
 
@@ -1333,7 +1454,8 @@ def warm_calibration_cache(generator, y_params, cases=None,
                 elif generator == "copula":
                     calibrate_rho_copula(n, k, dt, probe_rho, case_y_params,
                                         all_distinct=False, n_cal=n_cal,
-                                        seed=seed, freq_dict=freq_dict)
+                                        seed=seed, freq_dict=freq_dict,
+                                        calibration_mode=calibration_mode)
                 elif generator == "empirical":
                     pool = get_pool(n)
                     calibrate_rho_empirical(n, k, dt, probe_rho, pool,
@@ -1349,7 +1471,8 @@ def warm_calibration_cache(generator, y_params, cases=None,
                           calibration_mode=calibration_mode)
         elif generator == "copula":
             calibrate_rho_copula(n, n, None, probe_rho, case_y_params,
-                                all_distinct=True, n_cal=n_cal, seed=seed)
+                                all_distinct=True, n_cal=n_cal, seed=seed,
+                                calibration_mode=calibration_mode)
         elif generator == "empirical":
             pool = get_pool(n)
             calibrate_rho_empirical(n, n, None, probe_rho, pool,

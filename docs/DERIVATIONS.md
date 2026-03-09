@@ -557,3 +557,63 @@ Mitigation options:
 | Jitter midpoint interpolation | $(0.117+0.140)/2 = 0.12815$ | 0.12815 | ✓ Exact |
 | Post-jitter per-target bisection max dev | ≪ 0.001 | 0.00020 | ✓ |
 | Post-jitter multipoint max dev (within probes) | < 0.001 | 0.00062 | ✓ |
+
+---
+
+## 15. Batch vs Sequential RNG: Statistical Equivalence
+
+### 15.1 Context
+
+The calibration bisection estimates $E[\rho_S \mid \rho_{\text{in}}]$ by the Monte Carlo average
+
+$$\hat{\rho}(\rho_{\text{in}}) = \frac{1}{n_{\text{cal}}} \sum_{i=1}^{n_{\text{cal}}} \rho_S(x_i,\, y_i)$$
+
+where each $(x_i, y_i)$ is drawn from the data-generating process (random shuffle of the x-template, independent noise permutation). Two implementations exist:
+
+**Sequential path** (legacy single-point calibration, `calibrate_rho` with `calibration_mode="single"`): datasets are generated in a Python loop; each iteration calls `cal_rng.shuffle(x)` and `cal_rng.permutation(n)` sequentially. The RNG is reset to `seed` at the start of every call to `_mean_rho`, so all bisection steps see the same $n_\text{cal}$ datasets (common-random-numbers variance reduction).
+
+**Batch path** (multipoint fast path, `_precompute_calibration_arrays_fast`): all $n_\text{cal}$ shuffles are drawn at once via `cal_rng.permuted(x_batch, axis=1)` and `cal_rng.permuted(noise_base, axis=1)`. The arrays are precomputed once before bisection and reused at every bisection step (same common-random-numbers property, implemented differently). The copula fast path (when implemented) follows the same batch pattern: `z_x` and noise are precomputed once, and per bisection step only `z_y = rho_p * z_x + sqrt(1 - rho_p^2) * noise` is recomputed.
+
+### 15.2 Both paths draw from the correct distribution
+
+For the batch path, `cal_rng.permuted(M, axis=1)` applies an independent, uniformly random permutation to each row of matrix $M$. This is equivalent to calling `cal_rng.shuffle` independently for each row. Therefore:
+
+- Each row $i$ of `x_batch` is a uniformly random permutation of the x-template. ✓
+- Each row $i$ of `noise_batch` is a uniformly random permutation of $\{1, \ldots, n\}$. ✓
+- Rows are mutually independent (each permutation is drawn from fresh RNG state). ✓
+
+The marginal distribution of each $(x_i, y_i)$ is identical between paths. The joint distribution across $i$ is also the same: independent across $i$ in both cases.
+
+### 15.3 Estimator properties are identical
+
+Since both paths produce $n_\text{cal}$ IID draws from the same marginal:
+
+**Bias:**
+$$E\!\left[\hat{\rho}(\rho_{\text{in}})\right] = E\!\left[\rho_S(x_i, y_i)\right] = E[\rho_S]$$
+(unbiased, regardless of draw order or batch vs sequential generation).
+
+**Variance:**
+$$\mathrm{Var}\!\left(\hat{\rho}(\rho_{\text{in}})\right) = \frac{\mathrm{Var}(\rho_S)}{n_{\text{cal}}}$$
+(by independence of draws across $i$; same for both paths).
+
+**Convergence:** By the strong law of large numbers, $\hat{\rho}(\rho_{\text{in}}) \to E[\rho_S]$ almost surely as $n_\text{cal} \to \infty$, for both paths.
+
+### 15.4 What differs: numerical values, not statistical properties
+
+The two paths consume pseudo-random numbers in a different order. From the same `seed`, the batch path assigns different pseudo-random numbers to each sample than the sequential path does. This means:
+
+- The calibrated ratios $\hat{\rho} / \text{probe}$ will differ numerically between paths for the same `seed`.
+- The difference is not a bias — it is sampling variation. For large $n_\text{cal}$, both ratios are close to the true $E[\rho_S] / \text{probe}$, with the same standard error $\mathrm{SD}(\rho_S) / \sqrt{n_\text{cal}}$.
+
+### 15.5 Common-random-numbers property is preserved in both paths
+
+Within a single calibration run, the bisection loop evaluates $\hat{\rho}$ at multiple trial values of $\rho_{\text{in}}$ (the bisection steps). For the comparison $\hat{\rho}(\rho_1)$ vs $\hat{\rho}(\rho_2)$ to be low-variance (so bisection converges accurately), the same $n_\text{cal}$ datasets should be used at every bisection step.
+
+- **Sequential path:** `_mean_rho` resets to `seed` at the start of each call, so every bisection step evaluates on the same $n_\text{cal}$ shuffles. ✓
+- **Batch path:** Arrays are precomputed once before bisection begins, and `_eval_mean_rho_fast` re-uses the same `(s_x, s_n, x_ranks_batch)` at every bisection step. ✓
+
+Both paths achieve common-random-numbers variance reduction for bisection comparisons.
+
+### 15.6 Consequence for testing
+
+Tests should check calibration **accuracy** (is the realised mean Spearman close to the target?) rather than exact numerical equality of calibration ratios. A switch from sequential to batch RNG will change the ratio numerically while leaving the accuracy unchanged. The existing `tests/test_calibration_accuracy.py` already tests accuracy (checking that realised mean Spearman is within tolerance of the target), not exact ratio values.

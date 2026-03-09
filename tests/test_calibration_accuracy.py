@@ -11,6 +11,10 @@ Typical runtimes:
   - Filtered (1 case, 2 k, nonparametric only, 200 sims): ~30s
   - Full sweep (all cases, all k, all generators, 200 sims): ~10-20 min
 
+IMPORTANT NOTE: The tests will fail if the number of sims or number of calibrations
+are too small. Currently, all tests pass with all generators (aside form linear, which
+doesn't use calibration right now) with n_sims = 1000, and n_cal = 2000.
+
 Programmatic usage
 ------------------
     from test_calibration_accuracy import main

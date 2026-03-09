@@ -137,6 +137,8 @@ Since `mixed` is almost surely tie-free (see below), both vectors have identical
 
 The right-hand side depends only on the x-template, the noise permutations, and $`\rho_c`$ — **not** on the y marginal parameters (median, IQR, etc.). Therefore, calibration precompute can skip lognormal y generation entirely, replacing the four-step sequence (argsort → scatter y → rank y_final → Pearson-on-ranks) with a single `rank(mixed)`. This is implemented in `_eval_mean_rho_fast` and `_precompute_calibration_arrays_fast`.
 
+**Batch vs sequential RNG.** The fast path (`_precompute_calibration_arrays_fast`) generates all $`n_{\mathrm{cal}}`$ shuffles in a single batch call (`cal_rng.permuted`), whereas the legacy single-point path generates each shuffle sequentially in a Python loop, resetting the RNG to `seed` at the start of each `_mean_rho` call. Both produce IID uniform random permutations per dataset — the same estimator bias ($`0`$), variance ($`\mathrm{Var}(\rho_S)/n_{\mathrm{cal}}`$), and convergence rate. The calibration ratios differ numerically between paths (different pseudo-random numbers assigned to different samples) but are statistically equivalent. See [docs/DERIVATIONS.md](docs/DERIVATIONS.md) §15 for the formal argument.
+
 **Tie probability for lognormal y.** For $`n = 80`$ float64 lognormal draws, the probability of any two values being exactly equal is
 
 ```math
@@ -166,6 +168,38 @@ z_y = \rho_p z_x + \sqrt{1-\rho_p^2} Z
 **With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at $`\rho_s = 0.30`$ (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
 
 **Limitation**: When x has heavy ties, the jittering step that breaks tied ranks collapses rank information and attenuates the realised Spearman rho, leading to underestimated power. Alternatives tested — distributional transform (random uniform within each tie group's CDF band) and adaptive jitter (scaling jitter by tie group size) — improved the mild cases (k=10) but still failed the 0.01 accuracy threshold for heavy ties (k=4). This is a fundamental limitation of the continuous-marginals assumption. The method is retained for comparison purposes and works reliably when there are no ties; with heavy ties, calibration helps compensate for the rank information loss. It applies single-point calibration (probe at rho = 0.30) and is **not** the default method.
+
+#### Skip-y identity for Gaussian copula calibration
+
+The copula maps $`z_y`$ to $`y`$ through two steps: $`u_y = \Phi(z_y)`$ and $`y = F_{\ln}^{-1}(u_y)`$. Composing:
+
+```math
+y = F_{\ln}^{-1}(\Phi(z_y)) = \exp\!\bigl(\mu + \sigma\,\Phi^{-1}(\Phi(z_y))\bigr) = \exp(\mu + \sigma\, z_y)
+```
+
+Since $`f(z) = \exp(\mu + \sigma\, z)`$ is strictly increasing for $`\sigma > 0`$:
+
+```math
+z_y[j_1] < z_y[j_2] \iff y[j_1] < y[j_2]
+```
+
+Therefore $`\operatorname{rank}(y) = \operatorname{rank}(z_y)`$, and $`\rho_s(x,\, y) = \rho_s(x,\, z_y)`$. Calibration can skip the $`\Phi`$ and log-normal quantile steps entirely, computing Spearman directly from $`z_y`$. This is the basis for the copula calibration fast path, analogous to the nonparametric skip-y identity above. The fast path stores only $`(z_x,\, \text{noise})`$ — both rho-independent — and at each bisection step computes $`z_y = \rho_p z_x + \sqrt{1-\rho_p^2}\,\text{noise}`$ followed by `rank(z_y)`.
+
+**Clipping caveat.** The production code clips $`u_y`$ to $`[10^{-8},\, 1-10^{-8}]`$ inside `_lognormal_quantile`, making the composed transform non-decreasing but flat outside $`\Phi^{-1}(10^{-8}) \approx \pm 5.61`$. Two $`z_y`$ values both clipped to the same boundary would receive the same $`y`$, creating a tie that breaks the identity. The per-draw probability of exceeding the clip boundary is $`\Phi(-5.61) \approx 1.0 \times 10^{-8}`$; the probability of two or more draws being clipped to the same boundary is bounded by
+
+```math
+2\binom{n}{2}\bigl(\Phi(-5.61)\bigr)^2 < 2 \cdot \binom{80}{2} \cdot (10^{-8})^2 \approx 6.3 \times 10^{-13}
+```
+
+so the identity holds for all practical purposes. The fast path bypasses the clipping entirely (Spearman is computed from $`z_y`$ directly), so this caveat applies only when asking whether the slow and fast paths agree — and they do, with the same probability.
+
+#### Exactness of skip-y identities
+
+| Identity | Probability of failure |
+|---|---|
+| Nonparametric: `rank(y_final) = rank(mixed)` | ≈ 3.5 × 10⁻¹³ (float64 lognormal tie) |
+| Copula: `rank(y) = rank(z_y)` | < 6.3 × 10⁻¹³ (clipping creates tie) |
+| Batch vs sequential RNG | N/A — same distribution, different numbers |
 
 ### Linear Monte Carlo
 
