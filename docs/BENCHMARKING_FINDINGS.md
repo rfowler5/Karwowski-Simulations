@@ -1,7 +1,7 @@
-# Benchmarking Findings — CI Bootstrap Paths
+# Benchmarking Findings — CI Bootstrap Paths and Parallelism
 
-**Date:** February 2026 (updated with validation and decomposition)  
-**Purpose:** Summary of benchmark results and issues discovered for the batch CI bootstrap optimization. Use this as context when updating the README or running future benchmarks.
+**Date:** February–March 2026 (updated March 2026 with warm-cache-injection findings)  
+**Purpose:** Summary of benchmark results and issues discovered for the batch CI bootstrap optimization and parallel worker cache injection. Use this as context when updating the README or running future benchmarks.
 
 ---
 
@@ -9,9 +9,11 @@
 
 - **Batch path is correct:** Bit-identical to old path when given same data and bootstrap indices (see Validation below).
 - **Batch path is much faster sequential:** ~2.5× faster than old path when both run with `n_jobs=1`.
-- **Large gap (seq vs parallel for batch):** When using `n_jobs=-1` with the batch path, parallel is slower than sequential (~160s vs ~265s). **~89% of that gap is joblib overhead** (parallel slower even with `NUMBA_NUM_THREADS=1`). **~11% is nested parallelism** (default Numba threads add ~12s on top).
-- **Joblib helps the old path, hurts the batch path:** Old path parallel (263s) beats old path sequential (424s). Batch path parallel (265s) loses to batch path sequential (160s). Reason: batch path is so fast per scenario (~1.8s) that joblib’s fixed overhead (spawn, serialization) dominates; old path is slower per scenario (~4.8s) so overhead is amortized.
-- **Recommendation:** For the batch path, use **`n_jobs=1`** (sequential). For large runs (e.g. 10k n_reps, 1k n_boot), sequential with default Numba is fine on memory (~3–4 GB peak per scenario on 32 GB machine).
+- **Cache injection reverses the parallel recommendation:** When workers had cold caches, parallel was slower than sequential for the batch path. After adding warm-cache injection (`_init_worker_caches` / `_init_ci_worker_caches`), parallel with default Numba beats sequential at production params (~1.22× for CI, ~1.39× for power at n_sims=1000).
+- **Old "89% joblib overhead" finding was mostly cold-cache rebuild:** The prior decomposition showed parallel losing by ~106s even with `NUMBA_NUM_THREADS=1`. That gap was dominated by workers rebuilding calibration and null caches from scratch, not by true joblib spawn overhead. With warm caches injected, the gap closes and parallel wins.
+- **Default Numba threads wins over Numba=1 for parallel CI:** With warm workers, letting Numba use all threads beats throttling to 1. The old "Numba=1 wins" finding was an artifact of cold-cache overhead masking the nested-parallelism cost.
+- **Parallel crossover depends on per-scenario work:** Power parallel is slower than sequential at n_sims=50 (per-scenario ~32ms, joblib overhead dominates), roughly tied at n_sims=500, and wins at n_sims=1000. CI parallel wins at n_reps=200, n_boot=1000. At higher production tiers, the joblib overhead fraction continues to shrink and speedups of 1.7–2× are plausible.
+- **Updated recommendation:** Use **`n_jobs=-1`** (parallel, default Numba) for both power and CI at production params. Sequential remains better only at very small params (benchmark-scale n_sims=50).
 
 ---
 
@@ -33,7 +35,7 @@ Both paths use:
 
 ---
 
-## Benchmark Results (4-core machine, n_reps=200, n_boot=1000, single-point calibration)
+## Benchmark Results
 
 ### Single scenario (Case 3, k=4, even)
 
@@ -42,9 +44,11 @@ Both paths use:
 | Old (per-rep) | ~4.5s | — |
 | New (batch) | ~1.2s | **3.78×** |
 
-### Full grid (88 scenarios)
+### Full grid (88 scenarios) — Historical data (cold workers, single-point calibration)
 
-**Old benchmarking data** (ranges from earlier runs, run-to-run variance, 4-core, n_reps=200, n_boot=1000):
+These were measured before warm-cache injection. Workers rebuilt caches for each scenario independently.
+
+**Old benchmarking ranges** (run-to-run variance, 4-core, n_reps=200, n_boot=1000):
 
 | Config | Time |
 |--------|------|
@@ -53,7 +57,7 @@ Both paths use:
 | Old path, parallel (n_jobs=-1) | ~189–224s |
 | New path, parallel (n_jobs=-1) | ~172–268s |
 
-**New benchmarking data** (single measured run, 4-core, n_reps=200, n_boot=1000):
+**Single measured run** (4-core, n_reps=200, n_boot=1000, cold workers):
 
 | Config | Time |
 |--------|------|
@@ -64,56 +68,74 @@ Both paths use:
 | New path, parallel Numba=1 (n_jobs=-1) | 253.59s |
 | New path, parallel Numba=1 (n_jobs=2) | 297.61s |
 
-**Sequential:** New path is **~2.3–2.7× faster** than old path (ranges: 112–138s vs 285–323s; single run: 160s vs 424s).
+**Observation (cold workers):** New path parallel ≈ sequential or slower. The apparent "89% joblib overhead" was actually dominated by cold-cache rebuild in workers (each worker rebuilt calibration + null for its share of scenarios before computing anything).
 
-**Parallel:** Results varied by run. Old path parallel typically beats old path sequential (e.g. 263s vs 424s, or 189–224s vs 285–323s). New path parallel can be **slower than new path sequential** (e.g. 266s vs 160s); in earlier runs, new path parallel ranged ~172–268s (sometimes slower than new path parallel old path, e.g. 268s vs 224s, possibly before Numba warmup). Use the ranges above to estimate runtimes and variance.
+### Full grid (88 scenarios) — Warm-cache injection, multipoint calibration
+
+After adding `_init_worker_caches` / `_init_ci_worker_caches`, the main process warms caches and injects them into each worker via `initializer` / `initargs`. Workers start with full calibration and null caches.
+
+**CI results (n_reps=200, n_boot=1000):**
+
+| Config | Time | vs seq |
+|--------|------|--------|
+| New path, sequential (n_jobs=1) | 119.11s | — |
+| New path, parallel, default Numba (n_jobs=-1) | 97.66s | **1.22× faster** |
+| New path, parallel, Numba=1 (n_jobs=-1) | 106.50s | 1.12× faster |
+| New path, parallel, Numba=1 (n_jobs=2) | 120.40s | ~equal |
+
+**Key reversal:** Default Numba (4 threads per worker) now beats Numba=1 for CI. With warm caches, actual Numba compute is the bottleneck — Numba threads help rather than hurt. n_jobs=2 with Numba=1 is the worst config because it underutilizes the available cores.
+
+**Power results (nonparametric generator, n_sims=50/500/1000, n_cal=300):**
+
+| n_sims | Seq | Par | Par vs seq |
+|--------|-----|-----|------------|
+| 50 | 2.80s | 13.56s | 4.8× **slower** |
+| 500 | 18.43s | 18.21s | ~tied |
+| 1000 | ~38–41s | ~27–29s | **~1.39× faster** |
+
+Per-scenario time at n_sims=50 is ~32ms — too small for joblib overhead to be amortized. Crossover is around n_sims=500. At n_sims=1000, parallel wins clearly. At production tier n_sims values (2,220+), the joblib fraction is even smaller and speedups of 1.7–2× are plausible; benchmark at your actual tier to confirm.
 
 ---
 
-## Key Finding: Nested Parallelism Hurts the New Path
+## Revised Understanding: What the Old "89% Joblib Overhead" Was
 
-**Problem:** When running with `n_jobs=-1` (joblib uses all cores), the new path can be **slower than new path sequential**.
+The prior decomposition (Sequential 159s vs Parallel Numba=1 253s → 94s gap attributed to joblib) was measured with cold workers. Workers spent most of their time rebuilding calibration curves and null distributions for their assigned scenarios before doing any bootstrap work. That rebuild cost appeared as "joblib overhead" when comparing to hot-cache sequential. With injection, that 94s disappears and parallel genuinely wins.
 
-Example: New path sequential 112s vs new path parallel 172s — parallel is 1.5× slower.
-
-**Cause:** Nested parallelism.
-- joblib spawns N workers (e.g. 4)
-- Each worker runs `_batch_bootstrap_rhos_jit` with Numba's `prange` (default = 4 threads)
-- Total: 4 workers × 4 Numba threads = 16 threads on 4 cores → oversubscription, contention
-
-**Why the old path didn't have this:** The old path has 200 short Numba bursts per scenario (each `prange(1000)`). Brief parallel regions with Python work in between. Less sustained overlap between workers. The new path has one long Numba region (200k tasks) per scenario — all workers are fully busy simultaneously.
-
-**Verified:** Running the same workload with default Numba vs `NUMBA_NUM_THREADS=1` (both with `n_jobs=-1`) showed default consistently 4–11% slower across three runs. So nested parallelism is a real, reproducible cost.
+True joblib overhead (spawn, serialization, scheduling) is real but much smaller — likely a few seconds per run — and is amortized once per-scenario work is large enough.
 
 ---
 
-## Decomposition of the Large Gap (New Path Sequential vs Parallel)
+## Nested Parallelism: Old Finding vs New
 
-Using the measured full-grid run above:
+**Old finding (cold workers):** Numba=1 (253s) beat default Numba (265s) for parallel CI — nested parallelism cost ~12s (~11% of the old gap).
 
-- **New path sequential:** 159.74s  
-- **New path parallel (default Numba):** 265.61s  
-- **Gap:** ~106s (parallel is ~66% slower)
+**New finding (warm workers):** Default Numba (97.66s) beats Numba=1 (106.50s) — Numba threads are now net beneficial. The machine has 4 logical cores (2 physical, hyperthreaded); with 4 workers × 4 Numba threads = 16 threads on 4 logical cores there is oversubscription, but the Numba bootstrap kernel is sufficiently memory-latency-bound that extra threads help by overlapping I/O. Net: leave Numba at its default for parallel CI.
 
-**Split:**
+The old verification (`test_nested_parallelism.py`, "default 4–11% slower across three runs") was conducted with cold workers where the cache-rebuild cost swamped everything. Those results no longer apply.
 
-1. **Nested parallelism:** Parallel with default Numba (265.61s) vs parallel with `NUMBA_NUM_THREADS=1` (253.59s) → **~12s (~11%)**. So only a small fraction of the gap is from Numba oversubscription.
+---
 
-2. **Joblib overhead / no benefit:** Sequential (159.74s) vs parallel with Numba=1 (253.59s) → **~94s (~89%)**. Even with no nested parallelism, parallel is much slower than sequential. So **most of the large gap is joblib** (process spawn, serialization, scheduling), not Numba.
+## Parallel Crossover Summary
 
-**Why joblib doesn’t play well with batching:** Per-scenario time is much shorter for the batch path (~1.8s) than for the old path (~4.8s). Joblib has roughly fixed overhead per run (spawn, serializing tasks/results). That overhead is a small fraction of the old path’s work (so parallel helps) and a large fraction of the batch path’s work (so parallel hurts).
+| Workload | Sequential wins | Roughly tied | Parallel wins |
+|----------|----------------|-------------|---------------|
+| Power (n_sims) | < ~200 | ~500 | ≥ 1000 |
+| CI (n_reps × n_boot) | n_reps≈50, n_boot=500 | — | n_reps=200, n_boot=1000 |
+
+At higher production tiers (much larger n_sims/n_reps), the joblib overhead is an increasingly small fraction of total work and parallel speedup is expected to approach the theoretical limit for this machine. Prior to warm-cache injection, speedups of 1.7–1.9× were observed before the batch optimization, suggesting the hardware is capable of more than the current 1.2–1.4× — the remaining gap is likely the Numba parallelism interaction and joblib scheduling, not a hard ceiling.
 
 ---
 
 ## Mitigations Tested
 
-| Mitigation | Result |
-|------------|--------|
-| `NUMBA_NUM_THREADS=1` | Slight improvement in some runs (175s vs 172s with default). Reduces oversubscription but joblib spawn overhead remains. |
-| `n_jobs=2` | Slower than n_jobs=-1 (201s vs 175s) — fewer workers, less parallelism. |
-| Warmup (`warm_up_numba.py` or inline) | Recommended. First run pays Numba JIT compile; subsequent runs use cache. |
+| Mitigation | Old result (cold workers) | New result (warm workers) |
+|------------|--------------------------|--------------------------|
+| `NUMBA_NUM_THREADS=1` | Slight improvement (~4–11%) | Slightly worse than default |
+| `n_jobs=2` with Numba=1 | Slower than n_jobs=-1 | Worst config — underutilizes cores |
+| Warm-cache injection | N/A | **Primary fix** — parallel now wins |
+| Warmup (Numba JIT) | Recommended | Still recommended |
 
-**Recommendation for CI runs:** Use **`n_jobs=1`** (sequential) for the batch path — it is the fastest configuration (~112s for full grid). The new path's efficiency comes from eliminating Python loop overhead; adding joblib parallelism introduces overhead that can outweigh gains.
+**Current recommendation:** Use **`n_jobs=-1`** (parallel) with **default Numba threads** for both power and CI at production params. Sequential is only preferable at benchmark-scale n_sims (≤ 50 for power) where per-scenario time is too small for parallel to pay off.
 
 ---
 
@@ -130,7 +152,7 @@ Using the measured full-grid run above:
 
 Bootstrap indices are now generated in chunks of `_BATCH_BOOTSTRAP_CHUNK_SIZE` (default 2000) reps at a time. Peak memory per chunk is bounded at `n_boot × 2000 × n × 4` bytes ≈ **328 MB** regardless of total `n_reps`. The values are statistically equivalent and reproducible for a fixed seed and chunk size.
 
-**Remaining parallel memory concern:** With `n_jobs=-1`, multiple joblib workers run concurrently, each holding its own x_all/y_all/boot_rho_matrix arrays. For large `n_reps` tiers, prefer `n_jobs=1` (which is also the fastest configuration for the batch path — see above).
+**Parallel memory note:** With `n_jobs=-1`, multiple joblib workers run concurrently, each holding its own x_all/y_all/boot_rho_matrix arrays. For very large `n_reps` tiers on memory-constrained machines, reduce `n_jobs` if workers are killed.
 
 **Killing stuck workers:**
 ```powershell
@@ -144,8 +166,9 @@ Get-Process python* | Stop-Process -Force
 | Script | Purpose |
 |--------|---------|
 | `benchmark_batch_vs_no_batch.py` | Single-scenario comparison: old vs new path |
-| `benchmark_full_grid.py` | Full 88-scenario grid: sequential and parallel for both paths |
+| `benchmark_full_grid.py` | Full 88-scenario grid: sequential and parallel (new path, multipoint cal) |
 | `benchmark_ci_bootstrap.py` | Multipoint vs single-point calibration (uses batch path) |
+| `benchmark_realistic_runtimes.py` | Power + CI runtimes at small params scaled to precision tiers |
 
 **TODO:** Run `benchmark_ci_bootstrap.py` and record single vs multipoint calibration timings (single-scenario and 22-scenario); add a summary to this doc and optionally to the README. The README currently has only the per-tie-structure calibration cost (~3s single vs ~9s multipoint); we do not yet have documented end-to-end benchmark estimates for CI runs.
 
@@ -156,8 +179,9 @@ Get-Process python* | Stop-Process -Force
 | Script | Purpose |
 |--------|---------|
 | `test_batch_bootstrap_ci.py` | (1) Bit-identical test: batch vs old path, same data & bootstrap indices. (2) Sequential Numba=1: batch faster than old. (3) Batch path parallel vs sequential; (3b) old path parallel vs sequential. (4) Chunked bootstrap: JIT slice bit-identical test + reproducibility under forced `_boot_chunk_size=2`. Optional: power sim vectorized vs scalar. Uses small n_reps/n_boot. |
-| `test_nested_parallelism.py` | Isolates nested parallelism: runs same workload (batch, n_jobs=-1) in two processes — default Numba threads vs `NUMBA_NUM_THREADS=1`. Use `--compare`. Confirmed default 4–11% slower across three runs. |
-| `test_batch_sequential_vs_parallel.py` | Compares batch sequential (default Numba) vs batch parallel (Numba=1) in separate processes. Use `--compare`. Shows whether the “large gap” is joblib vs nested parallelism. |
+| `test_nested_parallelism.py` | Isolates nested parallelism: runs same workload (batch, n_jobs=-1) in two processes — default Numba threads vs `NUMBA_NUM_THREADS=1`. Results were measured with cold workers; re-run with warm-cache injection to get updated numbers. |
+| `test_batch_sequential_vs_parallel.py` | Compares batch sequential (default Numba) vs batch parallel (Numba=1) in separate processes. Original results were cold-worker; re-run for updated warm-cache comparison. |
+| `test_parallel_worker_cache.py` | Smoke test: parallel worker cache injection via joblib initializer/initargs. |
 
 **Validation result:** Bit-identical test (Step 1 of `test_batch_bootstrap_ci.py`) passes: `max |batch - old| = 0` over bootstrap rho matrix when both paths get the same data and bootstrap index order.
 
@@ -165,36 +189,38 @@ Get-Process python* | Stop-Process -Force
 
 ## Scaling: Large Runs (e.g. high-tier n_reps)
 
-**Sequential batch path with default Numba:**
+**Parallel batch path (recommended at production params):**
 
-- **Memory:** Bootstrap index memory is bounded at ~328 MB per chunk (chunk_size=2000, n_boot=500, n≈82) regardless of total `n_reps`. The dominant allocations at large n_reps are `x_all` and `y_all` of shape `(n_reps, n)` float64 — e.g. at n_reps=129,700 and n=82 these are ~85 MB each. Sequential processes one scenario at a time.
-- **Time:** Work scales with n_reps × n_boot; full grid runtime scales accordingly. No efficiency cliff from chunking (the loop overhead is negligible compared to JIT compute).
+- **Memory:** Bootstrap index memory is bounded at ~328 MB per chunk. At large n_reps, the dominant allocations are `x_all` and `y_all` of shape `(n_reps, n)` float64 — e.g. at n_reps=129,700 and n=82 these are ~85 MB each. With n_jobs=-1 and 4 workers, peak RAM ≈ 4 × per-scenario peak.
+- **Time:** Work scales with n_reps × n_boot. Parallel speedup grows as per-scenario time increases relative to fixed joblib overhead.
 
-**Recommendation:** For large runs, use **sequential (`n_jobs=1`)** with the batch path; memory is bounded by chunking.
+**Sequential batch path (use if memory-constrained):**
+
+Sequential processes one scenario at a time; peak RAM is bounded by chunking and a single scenario's arrays.
 
 ---
 
-## Reducing Joblib Overhead (if parallel is desired)
+## Reducing Joblib Overhead (if further tuning is desired)
 
-- **Batched tasks:** Run multiple scenarios per joblib task (e.g. 22 scenarios per task → 4 tasks instead of 88). Cuts serialization and scheduling; requires changing how work is passed (e.g. a function that runs a list of scenarios in one worker).
-- **Threading backend:** `Parallel(..., backend="threading")` avoids process spawn and pickle. Use `NUMBA_NUM_THREADS=1` to avoid nested parallelism (4 threads × 1 Numba thread). Worth trying; may or may not beat sequential.
-- **Pool reuse:** joblib’s loky backend can reuse the executor across runs; helps repeated runs in one session, not a single huge run.
+- **Batched tasks:** Run multiple scenarios per joblib task (e.g. 22 scenarios per task → 4 tasks instead of 88). Cuts serialization and scheduling; requires changing how work is passed.
+- **Threading backend:** `Parallel(..., backend="threading")` avoids process spawn and pickle. Untested with warm-cache injection; may improve or worsen results.
+- **Pool reuse:** joblib's loky backend can reuse the executor across runs; helps repeated runs in one session.
 
 ---
 
 ## README Update Suggestions
 
-1. **Performance section:** Add that the batch path (`BATCH_CI_BOOTSTRAP=True`) gives ~2.5–2.7× sequential speedup over the per-rep path. Single scenario: ~1.2s vs ~4.5s (200×1000). Full grid (88 scenarios, 200×1000): ~2.5–2.7 min (batch) vs ~7 min (old path).
+1. **Performance section:** Add that the batch path (`BATCH_CI_BOOTSTRAP=True`) gives ~2.5–2.7× sequential speedup over the per-rep path. Single scenario: ~1.2s vs ~4.5s (200×1000). Full grid (88 scenarios, 200×1000): ~2 min (batch, parallel) vs ~7 min (old path, sequential).
 
-2. **Parallelization caveat:** For CI with the batch path, **`n_jobs=1` (sequential) is faster than `n_jobs=-1`**. Most of the gap is joblib overhead (parallel slower even with `NUMBA_NUM_THREADS=1`); a smaller part is nested parallelism (joblib + Numba). Recommend sequential for the batch path. Use parallel for the old path if needed (joblib helps the old path).
+2. **Parallelization:** With warm-cache injection, **`n_jobs=-1`** (parallel, default Numba) is the recommended config for both power and CI at production params. Sequential only wins at benchmark-scale n_sims (≤ ~200 for power, very small n_reps for CI).
 
-3. **Memory:** Batch path allocates ~64 MB per scenario at 200×1000; at 10k×1k, ~3.2 GB per scenario. Sequential runs one scenario at a time; 32 GB RAM is sufficient. If running parallel with batch path, consider `n_jobs=4` or lower to avoid worker OOM; full grid with n_jobs=-1 can trigger `TerminatedWorkerError` on memory-constrained systems.
+3. **Memory:** Batch path peak memory per scenario is bounded by chunking (~328 MB for bootstrap indices + ~170 MB for data arrays at n_reps=129k). With n_jobs=-1, multiply by worker count; reduce n_jobs on memory-constrained machines.
 
-4. **Typical runtimes (4-core, 200×1000):** With batch path, sequential: single scenario ~1.2s; full grid (88 scenarios) ~2.5–3 min. Old path sequential ~7 min; old path parallel ~4.5 min.
+4. **Typical runtimes (4-core HT machine, 200×1000, warm caches):** CI full grid: ~98s parallel, ~119s sequential. Power full grid: ~27–29s at n_sims=1000 parallel, ~38–41s sequential.
 
 5. **Config:** Document `BATCH_CI_BOOTSTRAP` in config (default True). `VECTORIZE_DATA_GENERATION` must be True for batch path.
 
-6. **Validation/verification:** Mention `test_batch_bootstrap_ci.py`, `test_nested_parallelism.py`, and `test_batch_sequential_vs_parallel.py` for reproducing findings (see this doc).
+6. **Validation/verification:** Mention `test_batch_bootstrap_ci.py` and `test_parallel_worker_cache.py` for reproducing findings (see this doc).
 
 ---
 
@@ -214,5 +240,6 @@ USE_NUMBA = True                  # Numba JIT for bootstrap loops
 | File | Role |
 |------|------|
 | `spearman_helpers.py` | `_bootstrap_rhos_jit` (old path), `_batch_bootstrap_rhos_jit` (new path) |
-| `confidence_interval_calculator.py` | `bootstrap_ci_averaged` — branches on `batch_bootstrap` and `vectorize` |
+| `confidence_interval_calculator.py` | `bootstrap_ci_averaged` — branches on `batch_bootstrap` and `vectorize`; `_init_ci_worker_caches` for warm-cache injection |
+| `power_simulation.py` | `run_all_scenarios` — `_init_worker_caches` for warm-cache injection |
 | `config.py` | `BATCH_CI_BOOTSTRAP`, `VECTORIZE_DATA_GENERATION`, `USE_NUMBA` |

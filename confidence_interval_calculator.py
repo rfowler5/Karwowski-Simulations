@@ -67,7 +67,9 @@ from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             generate_cumulative_aluminum_batch,
                             generate_y_nonparametric_batch,
                             generate_y_copula_batch,
-                            generate_y_linear_batch)
+                            generate_y_linear_batch,
+                            warm_calibration_cache,
+                            get_calibration_cache_snapshots)
 from power_asymptotic import asymptotic_ci, get_x_counts
 from spearman_helpers import (spearman_rho_2d, _fast_spearman_rho,
                               _bootstrap_rhos_jit, _batch_bootstrap_rhos_jit,
@@ -80,6 +82,29 @@ from spearman_helpers import (spearman_rho_2d, _fast_spearman_rho,
 # would need ~20 GB).  Override via the private _boot_chunk_size parameter of
 # bootstrap_ci_averaged (for testing).
 _BATCH_BOOTSTRAP_CHUNK_SIZE = 2000
+
+
+def _init_ci_worker_caches(cal_snaps):
+    """Initialize a CI worker process with pre-warmed calibration cache snapshots.
+
+    Must be at module top level (not nested) so loky can pickle it by
+    reference. Called once per worker at startup before any tasks run.
+    CI workers never use the permutation null cache, so only calibration
+    caches are passed (saves 34-352 MB per worker vs power workers).
+
+    Parameters
+    ----------
+    cal_snaps : dict
+        Snapshot of all 6 calibration caches from data_generator, keyed
+        'mp', 'mp_cop', 'mp_emp', 'sp', 'sp_cop', 'sp_emp'.
+    """
+    import data_generator as _dg
+    _dg._CALIBRATION_CACHE_MULTIPOINT.update(cal_snaps["mp"])
+    _dg._CALIBRATION_CACHE_MULTIPOINT_COPULA.update(cal_snaps["mp_cop"])
+    _dg._CALIBRATION_CACHE_MULTIPOINT_EMP.update(cal_snaps["mp_emp"])
+    _dg._CALIBRATION_CACHE.update(cal_snaps["sp"])
+    _dg._CALIBRATION_CACHE_COPULA.update(cal_snaps["sp_cop"])
+    _dg._CALIBRATION_CACHE_EMP.update(cal_snaps["sp_emp"])
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +487,7 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
 def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
                          n_jobs=1, calibration_mode=None, batch_bootstrap=None,
-                         n_cal=None):
+                         n_cal=None, pre_warm=True):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.
 
     Uses bootstrap_ci_averaged (n_reps independent datasets, each
@@ -477,6 +502,12 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
         (default 300).  Calibration noise shifts CI endpoints (absolute
         values) but not CI width.  Use the n_cal values from config.CI_TIERS
         for accuracy guarantees; see docs/UNCERTAINTY_BUDGET.md Part 2.
+    pre_warm : bool
+        When True (default) and n_jobs != 1, warm the calibration cache in
+        the main process before snapshotting it into workers.  Re-warming an
+        already-warm cache costs only dict lookups (~88 checks, microseconds).
+        Set False only if you have pre-warmed manually and want to skip even
+        that overhead.
 
     Returns
     -------
@@ -488,6 +519,8 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
         alpha = ALPHA
     if tie_correction_mode is None:
         tie_correction_mode = ASYMPTOTIC_TIE_CORRECTION_MODE
+    if n_cal is None:
+        n_cal = N_CAL
 
     scenarios = []
     scenario_idx = 0
@@ -512,9 +545,22 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
     if n_jobs == 1:
         return [_ci_one_scenario(*args) for args in scenarios]
 
-    # n_jobs=-1 uses all available cores
-    return Parallel(n_jobs=n_jobs)(
-        delayed(_ci_one_scenario)(*args) for args in scenarios)
+    # Parallel path: warm calibration cache in main process then inject into
+    # each worker.  CI workers never use the permutation null cache, so only
+    # calibration snapshots are passed.
+    _eff_cal_mode = calibration_mode if calibration_mode is not None else CALIBRATION_MODE
+    if pre_warm:
+        warm_calibration_cache(generator,
+                               calibration_mode=_eff_cal_mode,
+                               n_cal=n_cal)
+
+    cal_snaps = get_calibration_cache_snapshots()
+
+    return Parallel(
+        n_jobs=n_jobs,
+        initializer=_init_ci_worker_caches,
+        initargs=(cal_snaps,),
+    )(delayed(_ci_one_scenario)(*args) for args in scenarios)
 
 
 def _asymptotic_ci_results(rho_obs, n, alpha, x_counts, tie_correction_mode):

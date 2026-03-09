@@ -1390,7 +1390,7 @@ def calibrate_rho_empirical(n, n_distinct, distribution_type, rho_target, pool,
     return float(np.clip(result, -0.999, 0.999))
 
 
-def warm_calibration_cache(generator, y_params, cases=None,
+def warm_calibration_cache(generator, y_params=None, cases=None,
                            n_distinct_values=None, dist_types=None,
                            freq_dict=None, calibration_mode="multipoint",
                            n_cal=300, seed=99):
@@ -1404,8 +1404,9 @@ def warm_calibration_cache(generator, y_params, cases=None,
     ----------
     generator : str
         'nonparametric', 'copula', or 'empirical'. Linear has no calibration.
-    y_params : dict
-        Must contain 'median', 'iqr', 'range' keys.
+    y_params : dict or None
+        Accepted for backwards compatibility but not used. The function
+        constructs y_params from each case dict internally.
     cases : dict or None
         Case definitions (default: config.CASES).
     n_distinct_values : list of int or None
@@ -1481,6 +1482,18 @@ def warm_calibration_cache(generator, y_params, cases=None,
         built += 1
 
     return built
+
+
+def get_calibration_cache_snapshots():
+    """Return shallow copies of all 6 calibration caches for passing to joblib workers."""
+    return {
+        "mp":     dict(_CALIBRATION_CACHE_MULTIPOINT),
+        "mp_cop": dict(_CALIBRATION_CACHE_MULTIPOINT_COPULA),
+        "mp_emp": dict(_CALIBRATION_CACHE_MULTIPOINT_EMP),
+        "sp":     dict(_CALIBRATION_CACHE),
+        "sp_cop": dict(_CALIBRATION_CACHE_COPULA),
+        "sp_emp": dict(_CALIBRATION_CACHE_EMP),
+    }
 
 
 def generate_y_nonparametric(x, rho_s, y_params, rng=None,

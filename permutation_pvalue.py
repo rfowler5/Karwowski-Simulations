@@ -309,3 +309,8 @@ def warm_precomputed_null_cache(cases=None, n_distinct_values=None,
         built += 1
 
     return built
+
+
+def get_null_cache_snapshot():
+    """Return a shallow copy of _NULL_CACHE for passing to joblib workers."""
+    return dict(_NULL_CACHE)

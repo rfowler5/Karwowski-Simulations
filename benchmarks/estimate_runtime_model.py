@@ -86,8 +86,8 @@ def _fmt_time_sec(t_sec):
 def _machine_info():
     logical = os.cpu_count() or 1
     try:
-        import multiprocessing
-        physical = getattr(multiprocessing, "cpu_count", lambda: logical)() or logical
+        import psutil
+        physical = psutil.cpu_count(logical=False) or logical
     except Exception:
         physical = "?"
     return logical, physical

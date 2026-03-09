@@ -83,6 +83,7 @@ FULL_ONLY_TESTS = [
     # These spawn subprocesses or run long MC loops; too slow for quick.
     ("test_nested_parallelism.py", ["--compare"]),           # nested multiprocessing deadlock / correctness check
     ("test_batch_sequential_vs_parallel.py", ["--compare"]), # batch vs sequential output agreement under parallelism
+    ("test_parallel_worker_cache.py", []),                   # joblib initializer/initargs: worker cache injection correctness
 ]
 
 

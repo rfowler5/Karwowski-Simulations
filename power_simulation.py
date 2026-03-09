@@ -47,12 +47,41 @@ from data_generator import (generate_cumulative_aluminum, get_generator,
                             generate_cumulative_aluminum_batch,
                             generate_y_nonparametric_batch,
                             generate_y_copula_batch,
-                            generate_y_linear_batch)
+                            generate_y_linear_batch,
+                            warm_calibration_cache,
+                            get_calibration_cache_snapshots)
 from spearman_helpers import spearman_rho_pvalue_2d, spearman_rho_2d
 if USE_PERMUTATION_PVALUE:
     from permutation_pvalue import (get_precomputed_null, get_cached_null,
                                     pvalues_from_precomputed_null,
-                                    pvalues_mc, _get_n_perm)
+                                    pvalues_mc, _get_n_perm,
+                                    warm_precomputed_null_cache,
+                                    get_null_cache_snapshot)
+
+
+def _init_worker_caches(null_snap, cal_snaps):
+    """Initialize a worker process with pre-warmed cache snapshots.
+
+    Must be at module top level (not nested) so loky can pickle it by
+    reference. Called once per worker at startup before any tasks run.
+
+    Parameters
+    ----------
+    null_snap : dict
+        Snapshot of permutation_pvalue._NULL_CACHE.
+    cal_snaps : dict
+        Snapshot of all 6 calibration caches from data_generator, keyed
+        'mp', 'mp_cop', 'mp_emp', 'sp', 'sp_cop', 'sp_emp'.
+    """
+    import permutation_pvalue as _pp
+    import data_generator as _dg
+    _pp._NULL_CACHE.update(null_snap)
+    _dg._CALIBRATION_CACHE_MULTIPOINT.update(cal_snaps["mp"])
+    _dg._CALIBRATION_CACHE_MULTIPOINT_COPULA.update(cal_snaps["mp_cop"])
+    _dg._CALIBRATION_CACHE_MULTIPOINT_EMP.update(cal_snaps["mp_emp"])
+    _dg._CALIBRATION_CACHE.update(cal_snaps["sp"])
+    _dg._CALIBRATION_CACHE_COPULA.update(cal_snaps["sp_cop"])
+    _dg._CALIBRATION_CACHE_EMP.update(cal_snaps["sp_emp"])
 
 
 def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
@@ -197,8 +226,22 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     return np.sum(pvals < alpha) / n_sims
 
 
-def _check_and_warn_boundary(result, lo_bound, hi_bound, boundary_tolerance=1e-4):
-    """Emit UserWarning if bisection result is within tolerance of a search boundary."""
+# When n_sims <= this value we do not emit the boundary warning (benchmark/timing runs).
+# Production tiers use n_sims >= 2220 (POWER_TIERS), so they still get the warning.
+N_SIMS_BOUNDARY_WARN_THRESHOLD = 50
+
+
+def _check_and_warn_boundary(result, lo_bound, hi_bound, boundary_tolerance=1e-4,
+                             n_sims=None):
+    """Emit UserWarning if bisection result is within tolerance of a search boundary.
+
+    When n_sims is given and <= N_SIMS_BOUNDARY_WARN_THRESHOLD, the warning is
+    suppressed so that benchmark/timing runs (e.g. n_sims=50) do not emit it,
+    including when run in parallel workers where the caller's warning filter
+    does not apply.
+    """
+    if n_sims is not None and n_sims <= N_SIMS_BOUNDARY_WARN_THRESHOLD:
+        return
     if abs(result - lo_bound) < boundary_tolerance or abs(result - hi_bound) < boundary_tolerance:
         warnings.warn(
             f"min_detectable_rho hit search boundary ({result:.4f}). "
@@ -259,7 +302,7 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                 lo = mid
 
     result = (lo + hi) / 2.0
-    _check_and_warn_boundary(result, lo_bound, hi_bound)
+    _check_and_warn_boundary(result, lo_bound, hi_bound, n_sims=n_sims)
     return result
 
 
@@ -293,7 +336,8 @@ def _power_one_scenario(case_id, n, y_params, k, dt, all_distinct,
 
 def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                       cases=None, n_distinct_values=None, dist_types=None,
-                      n_jobs=1, calibration_mode=None, n_cal=None):
+                      n_jobs=1, calibration_mode=None, n_cal=None,
+                      pre_warm=True):
     """Run power analysis for all (or filtered) scenarios.
 
     Parameters
@@ -310,6 +354,12 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
         Number of parallel jobs (1 = sequential, -1 = all cores).
     n_cal : int or None
         Calibration samples per bisection.  When None, uses config N_CAL.
+    pre_warm : bool
+        When True (default) and n_jobs != 1, warm the null and calibration
+        caches in the main process before snapshotting them into workers.
+        Re-warming an already-warm cache costs only dict lookups (~88 checks,
+        microseconds).  Set False only if you have pre-warmed manually and
+        want to avoid even that overhead.
 
     Returns
     -------
@@ -341,7 +391,7 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                                      d, generator, n_sims, sc_seed,
                                      calibration_mode, n_cal))
                     scenario_idx += 1
-        
+
         # This loops runs the all-distinct scenarios for the given generators
         for d in directions:
             sc_seed = (seed + scenario_idx) if seed is not None else None
@@ -353,6 +403,28 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
     if n_jobs == 1:
         return [_power_one_scenario(*args) for args in scenarios]
 
-    # n_jobs=-1 uses all available cores
-    return Parallel(n_jobs=n_jobs)(
-        delayed(_power_one_scenario)(*args) for args in scenarios)
+    # Parallel path: warm caches in main process then inject into each worker.
+    # Workers (loky spawn on Windows) start with empty module-level dicts;
+    # the initializer restores them from the main-process snapshot before
+    # any tasks are dispatched.
+    _eff_cal_mode = calibration_mode if calibration_mode is not None else CALIBRATION_MODE
+    if pre_warm:
+        if USE_PERMUTATION_PVALUE:
+            warm_precomputed_null_cache(cases=_cases,
+                                        n_distinct_values=_nvals,
+                                        dist_types=_dtypes)
+        warm_calibration_cache(generator,
+                               cases=_cases,
+                               n_distinct_values=_nvals,
+                               dist_types=_dtypes,
+                               calibration_mode=_eff_cal_mode,
+                               n_cal=n_cal)
+
+    null_snap = get_null_cache_snapshot() if USE_PERMUTATION_PVALUE else {}
+    cal_snaps = get_calibration_cache_snapshots()
+
+    return Parallel(
+        n_jobs=n_jobs,
+        initializer=_init_worker_caches,
+        initargs=(null_snap, cal_snaps),
+    )(delayed(_power_one_scenario)(*args) for args in scenarios)
