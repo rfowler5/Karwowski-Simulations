@@ -127,10 +127,11 @@ def _partition_cases(cases, n_jobs):
 
 def _merge_cal_snapshots(snapshots):
     """Merge a list of calibration snapshot dicts into one."""
-    merged = {k: {} for k in ("mp", "mp_cop", "mp_emp", "sp", "sp_cop", "sp_emp")}
+    merged = {k: {} for k in ("mp", "mp_cop", "mp_emp", "mp_lin",
+                               "sp", "sp_cop", "sp_emp", "sp_lin")}
     for snap in snapshots:
         for k in merged:
-            merged[k].update(snap[k])
+            merged[k].update(snap.get(k, {}))
     return merged
 
 
@@ -140,6 +141,26 @@ def _merge_null_snapshots(snapshots):
     for snap in snapshots:
         merged.update(snap)
     return merged
+
+
+def _probe_output_dir_writable(output_dir):
+    """Verify we can write to output_dir by creating and removing a probe file.
+
+    Raises SystemExit with a clear message if the directory is not writable,
+    so users see save problems before any heavy precomputation.
+    """
+    probe = Path(output_dir) / ".precompute_caches_write_probe"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as e:
+        print(
+            f"Error: cannot write to output directory {output_dir.resolve()!s}.\n"
+            f"  {e}\n"
+            "Fix permissions or choose a different --output-dir before precomputing.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _fmt_size(path):
@@ -164,7 +185,7 @@ def main():
         default="nonparametric",
         metavar="GEN[,GEN,...]",
         help="Comma-separated generators to calibrate (default: nonparametric). "
-             "Choices: nonparametric, copula, empirical.",
+             "Choices: nonparametric, copula, empirical, linear.",
     )
     parser.add_argument(
         "--n-cal",
@@ -201,7 +222,7 @@ def main():
     args = parser.parse_args()
 
     # Parse --generators (comma-separated)
-    valid_gens = ("nonparametric", "copula", "empirical")
+    valid_gens = ("nonparametric", "copula", "empirical", "linear")
     raw_gens = [g.strip().lower() for g in args.generators.split(",") if g.strip()]
     invalid = [g for g in raw_gens if g not in valid_gens]
     if invalid:
@@ -209,7 +230,8 @@ def main():
                      f"Choose from: {', '.join(valid_gens)}.")
     generators = [g for g in raw_gens if g in valid_gens]
     if not generators:
-        parser.error("--generators must be one or more of: nonparametric, copula, empirical.")
+        parser.error("--generators must be one or more of: "
+                     "nonparametric, copula, empirical, linear.")
 
     # Add project root to path so imports work when called from any directory.
     project_root = str(Path(__file__).resolve().parents[1])
@@ -223,9 +245,11 @@ def main():
                                 _CALIBRATION_CACHE_MULTIPOINT,
                                 _CALIBRATION_CACHE_MULTIPOINT_COPULA,
                                 _CALIBRATION_CACHE_MULTIPOINT_EMP,
+                                _CALIBRATION_CACHE_MULTIPOINT_LINEAR,
                                 _CALIBRATION_CACHE,
                                 _CALIBRATION_CACHE_COPULA,
-                                _CALIBRATION_CACHE_EMP)
+                                _CALIBRATION_CACHE_EMP,
+                                _CALIBRATION_CACHE_LINEAR)
     from permutation_pvalue import save_null_cache_to_disk, _NULL_CACHE
     from power_simulation import min_detectable_rho
     from confidence_interval_calculator import bootstrap_ci_averaged
@@ -235,6 +259,7 @@ def main():
     n_jobs = max(1, args.n_jobs)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _probe_output_dir_writable(output_dir)
 
     # --- Numba JIT warmup (one small run so cache is populated before cache build) ---
     print("Warming up Numba (one small run)...")
@@ -308,9 +333,11 @@ def main():
             _CALIBRATION_CACHE_MULTIPOINT.update(merged["mp"])
             _CALIBRATION_CACHE_MULTIPOINT_COPULA.update(merged["mp_cop"])
             _CALIBRATION_CACHE_MULTIPOINT_EMP.update(merged["mp_emp"])
+            _CALIBRATION_CACHE_MULTIPOINT_LINEAR.update(merged["mp_lin"])
             _CALIBRATION_CACHE.update(merged["sp"])
             _CALIBRATION_CACHE_COPULA.update(merged["sp_cop"])
             _CALIBRATION_CACHE_EMP.update(merged["sp_emp"])
+            _CALIBRATION_CACHE_LINEAR.update(merged["sp_lin"])
         save_calibration_caches_to_disk(cal_path, n_cal)
 
     elapsed_cal = time.perf_counter() - t0

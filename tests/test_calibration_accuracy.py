@@ -12,8 +12,8 @@ Typical runtimes:
   - Full sweep (all cases, all k, all generators, 200 sims): ~10-20 min
 
 IMPORTANT NOTE: The tests will fail if the number of sims or number of calibrations
-are too small. Currently, all tests pass with all generators (aside form linear, which
-doesn't use calibration right now) with n_sims = 1000, and n_cal = 2000.
+are too small. Currently, all tests pass with all generators with n_sims = 1000, and n_cal = 2000.
+Of course, if calibration isn't used, e.g., linear, the tests will fail even at those parameter values.
 
 Programmatic usage
 ------------------
@@ -51,7 +51,8 @@ from scipy.stats import spearmanr
 from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES, CALIBRATION_MODE
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
-                            calibrate_rho_empirical, generate_y_empirical,
+                            calibrate_rho_empirical, calibrate_rho_linear,
+                            generate_y_empirical,
                             get_pool, generate_y_nonparametric, _fit_lognormal,
                             _mean_rho_vec, _get_x_template,
                             _precompute_calibration_arrays, _eval_mean_rho,
@@ -117,6 +118,11 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
             n, n_distinct, distribution_type, rho_target, pool,
             all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
             calibration_mode=calibration_mode)
+    elif generator == "linear":
+        cal_rho = calibrate_rho_linear(
+            n, n_distinct, distribution_type, rho_target, y_params,
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+            calibration_mode=calibration_mode)
 
     for i in range(n_sims):
         x = generate_cumulative_aluminum(
@@ -133,7 +139,8 @@ def test_scenario(n, n_distinct, distribution_type, rho_target, generator,
             y = generate_y_empirical(x, rho_target, y_params, rng=rng,
                                       _calibrated_rho=cal_rho)
         else:
-            y = gen_fn(x, rho_target, y_params, rng=rng)
+            rho_in = cal_rho if cal_rho is not None else rho_target
+            y = gen_fn(x, rho_in, y_params, rng=rng)
         rhos[i], _ = spearmanr(x, y)
 
     mean_rho = float(np.mean(rhos))
@@ -167,7 +174,7 @@ def run_accuracy_tests(generators=None, rho_targets=None, n_sims=50,
     pd.DataFrame
     """
     if generators is None:
-        generators = ["nonparametric", "copula", "empirical"] # no linear cause not using calibration right now.
+        generators = ["nonparametric", "copula", "empirical", "linear"]
     if rho_targets is None:
         rho_targets = DEFAULT_RHO_TARGETS
 

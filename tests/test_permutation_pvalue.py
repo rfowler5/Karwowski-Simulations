@@ -136,12 +136,13 @@ def test_precomputed_null_cache_hit():
 def test_mc_on_cache_miss_cold():
     """With PVALUE_MC_ON_CACHE_MISS=True, a cold cache falls back to MC."""
     from permutation_pvalue import get_cached_null, _NULL_CACHE
+    from config import PVALUE_PRECOMPUTED_N_PRE
     import numpy as np
 
     # Use a unique x_counts unlikely to be in cache from other tests
     x_counts = np.array([11, 11, 11, 12])
     n = int(np.sum(x_counts))  # 45
-    key = (n, False, tuple(int(c) for c in x_counts))
+    key = (n, False, tuple(int(c) for c in x_counts), PVALUE_PRECOMPUTED_N_PRE)
     _NULL_CACHE.pop(key, None)  # ensure cold
 
     result = get_cached_null(n, False, x_counts)
@@ -157,7 +158,7 @@ def test_mc_on_cache_miss_warm():
     n = int(np.sum(x_counts))
     rng = np.random.default_rng(7)
     built = get_precomputed_null(n, False, x_counts, n_pre=500, rng=rng)
-    cached = get_cached_null(n, False, x_counts)
+    cached = get_cached_null(n, False, x_counts, n_pre=500)
     assert cached is built  # same object
 
 
@@ -174,8 +175,9 @@ def test_estimate_power_mc_on_cache_miss_standard():
 
     # Ensure cold cache for this scenario
     from power_asymptotic import get_x_counts
+    from config import PVALUE_PRECOMPUTED_N_PRE
     x_counts = get_x_counts(n, k, distribution_type=dt)
-    key = (n, False, tuple(int(c) for c in x_counts))
+    key = (n, False, tuple(int(c) for c in x_counts), PVALUE_PRECOMPUTED_N_PRE)
     pp._NULL_CACHE.pop(key, None)
 
     orig = ps.PVALUE_MC_ON_CACHE_MISS
@@ -202,10 +204,11 @@ def test_estimate_power_mc_on_cache_miss_custom_freq():
     y_params = {"median": case["median"], "iqr": case["iqr"], "range": case["range"]}
 
     # Custom freq: 4 groups with unequal sizes
+    from config import PVALUE_PRECOMPUTED_N_PRE
     custom_counts = [25, 20, 15, 13]
     freq_dict = {n: {4: {"custom": custom_counts}}}
     x_counts_tuple = tuple(custom_counts)
-    key = (n, False, x_counts_tuple)
+    key = (n, False, x_counts_tuple, PVALUE_PRECOMPUTED_N_PRE)
     pp._NULL_CACHE.pop(key, None)
 
     orig = ps.PVALUE_MC_ON_CACHE_MISS
@@ -222,6 +225,89 @@ def test_estimate_power_mc_on_cache_miss_custom_freq():
         ps.PVALUE_MC_ON_CACHE_MISS = orig
 
 
+def test_null_cache_disk_round_trip():
+    """save_null_cache_to_disk / load_null_cache_from_disk round-trips correctly.
+
+    Verifies that:
+    - Saved null(s) reload into the correct in-memory 4-tuple key.
+    - The reloaded array has the correct length and produces sane p-values.
+    - load_null_cache_from_disk returns False (and does not modify cache)
+      when called with a mismatched n_pre.
+    """
+    import os
+    import tempfile
+    import warnings
+    import numpy as np
+    from permutation_pvalue import (get_precomputed_null, get_cached_null,
+                                    save_null_cache_to_disk,
+                                    load_null_cache_from_disk,
+                                    pvalues_from_precomputed_null,
+                                    _NULL_CACHE)
+
+    n_pre_test = 300
+    x_counts = np.array([7, 7, 7, 7])
+    n = int(np.sum(x_counts))
+
+    # Build and record the null under a known key
+    rng = np.random.default_rng(99)
+    original = get_precomputed_null(n, False, x_counts, n_pre=n_pre_test, rng=rng)
+    assert len(original) == n_pre_test
+
+    with tempfile.NamedTemporaryFile(suffix=".pkl", delete=False) as f:
+        tmp_path = f.name
+    try:
+        save_null_cache_to_disk(tmp_path, n_pre_test)
+
+        # Remove only the key used in this test, then reload
+        key = (n, False, tuple(int(c) for c in x_counts), n_pre_test)
+        _NULL_CACHE.pop(key, None)
+        assert get_cached_null(n, False, x_counts, n_pre=n_pre_test) is None
+
+        result = load_null_cache_from_disk(tmp_path, n_pre_test)
+        assert result is True
+
+        reloaded = get_cached_null(n, False, x_counts, n_pre=n_pre_test)
+        assert reloaded is not None
+        assert len(reloaded) == n_pre_test
+        # Array content should be identical to what was saved
+        assert np.array_equal(reloaded, original)
+        # p-values from reloaded null should be sane
+        pvals = pvalues_from_precomputed_null(np.array([0.0]), reloaded)
+        assert pvals[0] > 0.5
+
+        # Loading with wrong n_pre should return False and not pollute cache
+        _NULL_CACHE.pop(key, None)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Disk null cache has n_pre=.*current n_pre=.*",
+                category=UserWarning,
+            )
+            result_wrong = load_null_cache_from_disk(tmp_path, n_pre_test + 1)
+        assert result_wrong is False
+        assert get_cached_null(n, False, x_counts, n_pre=n_pre_test) is None
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_different_n_pre_separate_cache_entries():
+    """Different n_pre values produce independent cache entries for the same scenario."""
+    from permutation_pvalue import get_precomputed_null
+    import numpy as np
+
+    x_counts = np.array([20, 20, 20, 20])
+    rng1 = np.random.default_rng(42)
+    null_small = get_precomputed_null(80, False, x_counts, n_pre=100, rng=rng1)
+    rng2 = np.random.default_rng(43)
+    null_large = get_precomputed_null(80, False, x_counts, n_pre=500, rng=rng2)
+    assert null_small is not null_large
+    assert len(null_small) == 100
+    assert len(null_large) == 500
+    # A second call with the same n_pre should hit cache and return the same object
+    null_small_again = get_precomputed_null(80, False, x_counts, n_pre=100)
+    assert null_small_again is null_small
+
+
 if __name__ == "__main__":
     test_precomputed_null_shape_and_stats()
     test_precomputed_pvalue_rho_zero()
@@ -233,4 +319,6 @@ if __name__ == "__main__":
     test_mc_on_cache_miss_warm()
     test_estimate_power_mc_on_cache_miss_standard()
     test_estimate_power_mc_on_cache_miss_custom_freq()
+    test_null_cache_disk_round_trip()
+    test_different_n_pre_separate_cache_entries()
     print("All tests passed.")

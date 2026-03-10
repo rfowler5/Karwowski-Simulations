@@ -51,7 +51,7 @@ def get_precomputed_null(n, all_distinct, x_counts, n_pre=None, rng=None):
 
     Auto-builds on cache miss (~0.3s for n≈80, n_pre=50k via vectorised
     matmul). Cached for future calls with the same
-    (n, all_distinct, tuple(x_counts)) key.
+    (n, all_distinct, tuple(x_counts), n_pre) key.
 
     The generator (nonparametric, copula, linear) is intentionally not part
     of the cache key.  All non-empirical generators produce continuous y with
@@ -83,7 +83,7 @@ def get_precomputed_null(n, all_distinct, x_counts, n_pre=None, rng=None):
     if n_pre is None:
         n_pre = PVALUE_PRECOMPUTED_N_PRE
 
-    key = (n, all_distinct, tuple(int(c) for c in x_counts))
+    key = (n, all_distinct, tuple(int(c) for c in x_counts), n_pre)
 
     if key in _NULL_CACHE:
         return _NULL_CACHE[key]
@@ -116,7 +116,7 @@ def get_precomputed_null(n, all_distinct, x_counts, n_pre=None, rng=None):
     return sorted_abs_null
 
 
-def get_cached_null(n, all_distinct, x_counts):
+def get_cached_null(n, all_distinct, x_counts, n_pre=None):
     """Return the cached sorted |null_rho| array, or None if not in cache.
 
     Unlike get_precomputed_null, this never builds the null on a cache miss.
@@ -128,12 +128,18 @@ def get_cached_null(n, all_distinct, x_counts):
     n : int
     all_distinct : bool
     x_counts : array-like
+    n_pre : int or None
+        Expected null size. Defaults to config.PVALUE_PRECOMPUTED_N_PRE.
+        Must match the n_pre used when the null was built, otherwise a
+        cache miss is returned.
 
     Returns
     -------
     sorted_abs_null : ndarray or None
     """
-    key = (n, all_distinct, tuple(int(c) for c in x_counts))
+    if n_pre is None:
+        n_pre = PVALUE_PRECOMPUTED_N_PRE
+    key = (n, all_distinct, tuple(int(c) for c in x_counts), n_pre)
     return _NULL_CACHE.get(key, None)
 
 
@@ -322,14 +328,22 @@ def save_null_cache_to_disk(path, n_pre):
     The file includes metadata (n_pre, config hash) so that
     load_null_cache_from_disk() can detect stale files.
     Creates the parent directory if it does not exist.
+
+    Disk keys are scenario 3-tuples (n, all_distinct, x_counts_tuple),
+    decoupled from the in-memory 4-tuple keys that include n_pre.  n_pre is
+    stored in metadata and recovered via len(array) on load, so the disk
+    format stays stable if the in-memory key format changes again.
     """
     import os
     import pickle
     from data_generator import compute_config_hash
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    snapshot = get_null_cache_snapshot()
+    # Strip n_pre from in-memory keys; disk keys are scenario 3-tuples.
+    disk_cache = {k[:3]: v for k, v in snapshot.items()}
     payload = {
         "metadata": {"n_pre": n_pre, "config_hash": compute_config_hash()},
-        "cache": get_null_cache_snapshot(),
+        "cache": disk_cache,
     }
     with open(path, "wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -367,5 +381,10 @@ def load_null_cache_from_disk(path, n_pre) -> bool:
             stacklevel=2,
         )
         return False
-    _NULL_CACHE.update(payload["cache"])
+    # Reconstruct in-memory 4-tuple keys from disk 3-tuple keys.
+    # len(arr) == n_pre for every entry (validated by the metadata check above),
+    # so the array is self-describing: no separate migration logic needed.
+    for scenario_key, arr in payload["cache"].items():
+        full_key = scenario_key[:3] + (len(arr),)
+        _NULL_CACHE[full_key] = arr
     return True

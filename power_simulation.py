@@ -20,7 +20,7 @@ Typical runtimes (nonparametric generator, Numba JIT + precomputed null active):
   - Single scenario: ~0.5s (500 sims), ~4s (10000 sims)
   - Full grid (88 scenarios, 500 sims): ~40s sequential (warm caches), ~20s with n_jobs=4
   - Calibration is cached per (n, k, dist_type) and reused across rho values
-  - Copula now uses calibration; linear has no calibration overhead
+  - All generators (nonparametric, copula, empirical, linear) use calibration by default
   - Pre-OPT-2 (no precomputed null): ~5s/500 sims, ~45s/10000 sims, ~6 min full grid
 """
 
@@ -41,7 +41,8 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
 from power_asymptotic import get_x_counts
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
-                            calibrate_rho_empirical, digitized_available,
+                            calibrate_rho_empirical, calibrate_rho_linear,
+                            digitized_available,
                             generate_y_empirical, generate_y_empirical_batch,
                             get_pool,
                             generate_y_nonparametric, _fit_lognormal,
@@ -75,8 +76,8 @@ def _init_worker_caches(null_snap, cal_snaps):
     null_snap : dict
         Snapshot of permutation_pvalue._NULL_CACHE.
     cal_snaps : dict
-        Snapshot of all 6 calibration caches from data_generator, keyed
-        'mp', 'mp_cop', 'mp_emp', 'sp', 'sp_cop', 'sp_emp'.
+        Snapshot of all 8 calibration caches from data_generator, keyed
+        'mp', 'mp_cop', 'mp_emp', 'mp_lin', 'sp', 'sp_cop', 'sp_emp', 'sp_lin'.
     """
     import permutation_pvalue as _pp
     import data_generator as _dg
@@ -84,15 +85,18 @@ def _init_worker_caches(null_snap, cal_snaps):
     _dg._CALIBRATION_CACHE_MULTIPOINT.update(cal_snaps["mp"])
     _dg._CALIBRATION_CACHE_MULTIPOINT_COPULA.update(cal_snaps["mp_cop"])
     _dg._CALIBRATION_CACHE_MULTIPOINT_EMP.update(cal_snaps["mp_emp"])
+    _dg._CALIBRATION_CACHE_MULTIPOINT_LINEAR.update(cal_snaps["mp_lin"])
     _dg._CALIBRATION_CACHE.update(cal_snaps["sp"])
     _dg._CALIBRATION_CACHE_COPULA.update(cal_snaps["sp_cop"])
     _dg._CALIBRATION_CACHE_EMP.update(cal_snaps["sp_emp"])
+    _dg._CALIBRATION_CACHE_LINEAR.update(cal_snaps["sp_lin"])
 
 
 def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
                    generator="nonparametric", n_sims=None, alpha=None,
                    all_distinct=False, seed=None, freq_dict=None,
-                   calibration_mode=None, vectorize=None, n_cal=None):
+                   calibration_mode=None, vectorize=None, n_cal=None,
+                   use_calibration=True):
     """Estimate power of a two-sided Spearman test via Monte Carlo.
 
     Parameters
@@ -104,6 +108,11 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         "custom", used instead of FREQ_DICT.
     n_cal : int or None
         Calibration samples per bisection.  When None, uses config N_CAL.
+    use_calibration : bool
+        When True (default), calibrate the generator's rho input to correct
+        for tie-structure attenuation.  When False, pass rho_s through
+        uncalibrated (cheap; primarily useful for the linear generator as a
+        fast comparison baseline).
 
     Returns
     -------
@@ -135,22 +144,28 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
 
     cal_rho = None
     ln_params = _fit_lognormal(y_params["median"], y_params["iqr"])
-    if generator == "nonparametric":
-        cal_rho = calibrate_rho(
-            n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict,
-            calibration_mode=calibration_mode, n_cal=n_cal)
-    elif generator == "copula":
-        cal_rho = calibrate_rho_copula(
-            n, n_distinct, distribution_type, rho_s, y_params,
-            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
-            calibration_mode=calibration_mode)
-    elif generator == "empirical":
-        pool = get_pool(n)
-        cal_rho = calibrate_rho_empirical(
-            n, n_distinct, distribution_type, rho_s, pool,
-            all_distinct=all_distinct, freq_dict=freq_dict,
-            calibration_mode=calibration_mode, n_cal=n_cal)
+    if use_calibration:
+        if generator == "nonparametric":
+            cal_rho = calibrate_rho(
+                n, n_distinct, distribution_type, rho_s, y_params,
+                all_distinct=all_distinct, freq_dict=freq_dict,
+                calibration_mode=calibration_mode, n_cal=n_cal)
+        elif generator == "copula":
+            cal_rho = calibrate_rho_copula(
+                n, n_distinct, distribution_type, rho_s, y_params,
+                all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+                calibration_mode=calibration_mode)
+        elif generator == "empirical":
+            pool = get_pool(n)
+            cal_rho = calibrate_rho_empirical(
+                n, n_distinct, distribution_type, rho_s, pool,
+                all_distinct=all_distinct, freq_dict=freq_dict,
+                calibration_mode=calibration_mode, n_cal=n_cal)
+        elif generator == "linear":
+            cal_rho = calibrate_rho_linear(
+                n, n_distinct, distribution_type, rho_s, y_params,
+                all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+                calibration_mode=calibration_mode)
 
     if vectorize:
         x_all = generate_cumulative_aluminum_batch(
@@ -170,7 +185,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
                 x_all, rho_s, y_params, rng=rng,
                 _calibrated_rho=cal_rho)
         else:
-            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=rng,
+            rho_in = cal_rho if cal_rho is not None else rho_s
+            y_all = generate_y_linear_batch(x_all, rho_in, y_params, rng=rng,
                                             _return_ranks=True)
     else:
         x_all = np.empty((n_sims, n))
@@ -190,7 +206,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
                 yi = generate_y_empirical(xi, rho_s, y_params, rng=rng,
                                           _calibrated_rho=cal_rho)
             else:
-                yi = gen_fn(xi, rho_s, y_params, rng=rng)
+                rho_in = cal_rho if cal_rho is not None else rho_s
+                yi = gen_fn(xi, rho_in, y_params, rng=rng)
             x_all[i] = xi
             y_all[i] = yi
 
@@ -203,7 +220,7 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
     # continuous y with no ties.  Under H0, the y-ranks are a uniform
     # permutation of {1,...,n} regardless of generator, so the permutation
     # null of Spearman rho depends only on n and the x tie structure.  The
-    # cache key (n, all_distinct, tuple(x_counts)) correctly captures this:
+    # cache key (n, all_distinct, tuple(x_counts), n_pre) correctly captures this:
     # generator is intentionally excluded, and the cached null is shared
     # across all non-empirical generators for the same scenario.
     # Empirical also uses the precomputed null by default (EMPIRICAL_USE_PRECOMPUTED_NULL=True).
@@ -213,7 +230,8 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         x_counts = get_x_counts(n, n_distinct, distribution_type=distribution_type,
                                 all_distinct=all_distinct, freq_dict=freq_dict)
         if PVALUE_MC_ON_CACHE_MISS:
-            sorted_abs_null = get_cached_null(n, all_distinct, x_counts)
+            sorted_abs_null = get_cached_null(n, all_distinct, x_counts,
+                                              n_pre=PVALUE_PRECOMPUTED_N_PRE)
         else:
             sorted_abs_null = get_precomputed_null(
                 n, all_distinct, x_counts, n_pre=PVALUE_PRECOMPUTED_N_PRE, rng=rng)
@@ -262,7 +280,8 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                        generator="nonparametric", target_power=None,
                        n_sims=None, alpha=None, all_distinct=False,
                        direction="positive", seed=None, tolerance=0.49e-4,
-                       freq_dict=None, calibration_mode=None, n_cal=None):
+                       freq_dict=None, calibration_mode=None, n_cal=None,
+                       use_calibration=True):
     """Binary search for the minimum |rho| detectable at *target_power*.
 
     Parameters
@@ -273,6 +292,8 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
         Custom frequency dictionary for distribution_type "custom".
     n_cal : int or None
         Calibration samples per bisection.  When None, uses config N_CAL.
+    use_calibration : bool
+        Passed through to estimate_power.  See estimate_power for details.
     """
     if target_power is None:
         target_power = TARGET_POWER
@@ -297,7 +318,8 @@ def min_detectable_rho(n, n_distinct, distribution_type, y_params,
                             generator=generator, n_sims=n_sims, alpha=alpha,
                             all_distinct=all_distinct, seed=seed,
                             freq_dict=freq_dict,
-                            calibration_mode=calibration_mode, n_cal=n_cal)
+                            calibration_mode=calibration_mode, n_cal=n_cal,
+                            use_calibration=use_calibration)
         if direction == "positive":
             if pw < target_power:
                 lo = mid
@@ -324,12 +346,14 @@ def _search_directions(case_id):
 
 def _power_one_scenario(case_id, n, y_params, k, dt, all_distinct,
                         direction, generator, n_sims, seed,
-                        calibration_mode=None, n_cal=None):
+                        calibration_mode=None, n_cal=None,
+                        use_calibration=True):
     """Run min_detectable_rho for a single (case, k, dt, direction)."""
     md = min_detectable_rho(
         n, k, dt, y_params, generator=generator,
         n_sims=n_sims, all_distinct=all_distinct, direction=direction,
-        seed=seed, calibration_mode=calibration_mode, n_cal=n_cal)
+        seed=seed, calibration_mode=calibration_mode, n_cal=n_cal,
+        use_calibration=use_calibration)
     return {
         "case": case_id,
         "n": n,
@@ -346,7 +370,7 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                       cases=None, n_distinct_values=None, dist_types=None,
                       n_jobs=1, calibration_mode=None, n_cal=None,
                       pre_warm=True, disk_cache_dir=None,
-                      save_cache_to_disk=None):
+                      save_cache_to_disk=None, use_calibration=True):
     """Run power analysis for all (or filtered) scenarios.
 
     Parameters
@@ -382,6 +406,10 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
         When True (and disk_cache_dir is set), any caches built in-process
         during this run are persisted to disk.  When None (default), the
         effective value comes from config.SAVE_CACHE_TO_DISK.
+    use_calibration : bool
+        When False, skip rho calibration for all scenarios (uncalibrated).
+        Primarily useful for running the linear generator as a cheap
+        comparison baseline.  Default True.
 
     Returns
     -------
@@ -413,7 +441,7 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                     sc_seed = (seed + scenario_idx) if seed is not None else None
                     scenarios.append((case_id, n, y_params, k, dt, False,
                                      d, generator, n_sims, sc_seed,
-                                     calibration_mode, n_cal))
+                                     calibration_mode, n_cal, use_calibration))
                     scenario_idx += 1
 
         # This loops runs the all-distinct scenarios for the given generators
@@ -421,7 +449,7 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
             sc_seed = (seed + scenario_idx) if seed is not None else None
             scenarios.append((case_id, n, y_params, n, None, True,
                               d, generator, n_sims, sc_seed,
-                              calibration_mode, n_cal))
+                              calibration_mode, n_cal, use_calibration))
             scenario_idx += 1
 
     # Disk cache load (before pre_warm so pre_warm is instant on a hit).
@@ -443,12 +471,13 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                 warm_precomputed_null_cache(cases=_cases,
                                             n_distinct_values=_nvals,
                                             dist_types=_dtypes)
-            warm_calibration_cache(generator,
-                                   cases=_cases,
-                                   n_distinct_values=_nvals,
-                                   dist_types=_dtypes,
-                                   calibration_mode=_eff_cal_mode,
-                                   n_cal=n_cal)
+            if use_calibration:
+                warm_calibration_cache(generator,
+                                       cases=_cases,
+                                       n_distinct_values=_nvals,
+                                       dist_types=_dtypes,
+                                       calibration_mode=_eff_cal_mode,
+                                       n_cal=n_cal)
         results = [_power_one_scenario(*args) for args in scenarios]
         _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
         if disk_cache_dir is not None and _save and pre_warm:
@@ -468,12 +497,13 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
             warm_precomputed_null_cache(cases=_cases,
                                         n_distinct_values=_nvals,
                                         dist_types=_dtypes)
-        warm_calibration_cache(generator,
-                               cases=_cases,
-                               n_distinct_values=_nvals,
-                               dist_types=_dtypes,
-                               calibration_mode=_eff_cal_mode,
-                               n_cal=n_cal)
+        if use_calibration:
+            warm_calibration_cache(generator,
+                                   cases=_cases,
+                                   n_distinct_values=_nvals,
+                                   dist_types=_dtypes,
+                                   calibration_mode=_eff_cal_mode,
+                                   n_cal=n_cal)
 
     null_snap = get_null_cache_snapshot() if USE_PERMUTATION_PVALUE else {}
     cal_snaps = get_calibration_cache_snapshots()
@@ -492,3 +522,24 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
             save_null_cache_to_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
 
     return results
+
+
+# Uncomment to run the linear generator without calibration (cheap comparison baseline).
+# def run_all_scenarios_linear_uncalibrated(n_sims=None, seed=None, cases=None,
+#                                           n_distinct_values=None, dist_types=None,
+#                                           n_jobs=1, pre_warm=True, disk_cache_dir=None,
+#                                           save_cache_to_disk=None):
+#     """Run all scenarios with generator='linear' and use_calibration=False."""
+#     return run_all_scenarios(
+#         generator="linear",
+#         n_sims=n_sims,
+#         seed=seed,
+#         cases=cases,
+#         n_distinct_values=n_distinct_values,
+#         dist_types=dist_types,
+#         n_jobs=n_jobs,
+#         pre_warm=pre_warm,
+#         disk_cache_dir=disk_cache_dir,
+#         save_cache_to_disk=save_cache_to_disk,
+#         use_calibration=False,
+#     )

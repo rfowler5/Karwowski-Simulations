@@ -554,6 +554,55 @@ cold (each rebuilds its own entries, results are lost when the worker exits).
 
 ---
 
+## Choosing pre_warm and disk_cache_dir (parameter guide)
+
+The interaction of `pre_warm` and `disk_cache_dir` can be confusing.  This
+section clarifies what each parameter controls and how to choose them.
+
+**What each parameter controls**
+
+- **`disk_cache_dir`** — When set, the simulation *always* tries to load
+  calibration and null caches from disk *before* any pre-warm step.  Load
+  is independent of `pre_warm`.  If the load succeeds (matching n_cal/n_pre
+  and config hash), the in-memory caches are full; if it fails or is not
+  set, caches start empty (or partial).
+
+- **`pre_warm`** — Controls only whether the *in-process warm step* runs
+  (building all cache entries for the grid).  It does *not* control disk
+  load or whether parallel workers receive a snapshot.  Workers always
+  receive a snapshot of whatever is in the main process after (optional)
+  disk load and (optional) warm.
+
+**Implications**
+
+- **pre_warm=False + successful disk load:** Caches are full from disk;
+  parallel workers get that snapshot.  Runtime behavior is the same as
+  pre_warm=True (no lazy builds during the run).  The only differences:
+  (1) we never run the warm step (no fill-in of missing keys if the disk
+  load was partial); (2) we *never* save caches back to disk when
+  pre_warm=False — the save logic is gated on `pre_warm`.
+
+- **pre_warm=False + no disk load (or load failed):** Caches stay empty;
+  entries are built on first use (lazy).  Parallel workers start cold and
+  may rebuild the same entries redundantly.
+
+**Which parameters to choose**
+
+| Goal | disk_cache_dir | pre_warm |
+|------|----------------|----------|
+| Normal run, no disk cache | omit or None | True (default) |
+| Use pre-built disk cache (e.g. from precompute_caches.py) | path to dir | True (default) — load then optional warm; can save if we built anything |
+| Use disk cache, never run warm step, never save back | path to dir | False — load still runs; workers get snapshot; we never save |
+| Minimal overhead (you already filled caches manually) | optional | False — if no disk path, workers start cold |
+
+**Possible future change:** The current behavior (disk load independent of
+pre_warm; snapshot always sent to workers) may be refined so that
+pre_warm=False has a clearer meaning (e.g. “do not populate or inject
+caches”) or so that save-to-disk is not gated on pre_warm.  See the backlog
+plan for a reminder to revisit.
+
+---
+
 ## Read-only by default; opt-in to save
 
 The simulation **never writes** cache files unless you explicitly ask it to.

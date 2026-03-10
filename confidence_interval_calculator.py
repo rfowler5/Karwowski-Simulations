@@ -62,7 +62,8 @@ from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             generate_y_empirical_batch, generate_y_linear,
                             generate_y_nonparametric, get_generator,
                             calibrate_rho, calibrate_rho_copula,
-                            calibrate_rho_empirical, get_pool,
+                            calibrate_rho_empirical, calibrate_rho_linear,
+                            get_pool,
                             _fit_lognormal,
                             generate_cumulative_aluminum_batch,
                             generate_y_nonparametric_batch,
@@ -325,6 +326,11 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
             n, n_distinct, distribution_type, rho_s, pool,
             all_distinct=all_distinct, freq_dict=freq_dict,
             calibration_mode=calibration_mode, n_cal=n_cal)
+    elif generator == "linear":
+        cal_rho = calibrate_rho_linear(
+            n, n_distinct, distribution_type, rho_s, y_params,
+            all_distinct=all_distinct, freq_dict=freq_dict, n_cal=n_cal,
+            calibration_mode=calibration_mode)
 
     if batch_bootstrap and vectorize:
         # --- NEW BATCH PATH ---
@@ -347,7 +353,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                 x_all, rho_s, y_params, rng=data_rng,
                 _calibrated_rho=cal_rho)
         else:
-            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng,
+            rho_in = cal_rho if cal_rho is not None else rho_s
+            y_all = generate_y_linear_batch(x_all, rho_in, y_params, rng=data_rng,
                                             _return_ranks=True)
 
         # Step 2: Compute rho_hats in one vectorized call
@@ -403,7 +410,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                 x_reps, rho_s, y_params, rng=data_rng,
                 _calibrated_rho=cal_rho)
         else:
-            y_reps = generate_y_linear_batch(x_reps, rho_s, y_params, rng=data_rng)
+            rho_in = cal_rho if cal_rho is not None else rho_s
+            y_reps = generate_y_linear_batch(x_reps, rho_in, y_params, rng=data_rng)
 
         for rep in range(n_reps):
             x, y = x_reps[rep], y_reps[rep]
@@ -430,7 +438,8 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
                 y = generate_y_empirical(x, rho_s, y_params, rng=data_rng,
                                          _calibrated_rho=cal_rho)
             else:
-                y = gen_fn(x, rho_s, y_params, rng=data_rng)
+                rho_in = cal_rho if cal_rho is not None else rho_s
+                y = gen_fn(x, rho_in, y_params, rng=data_rng)
             rho_hat = _fast_spearman_rho(x, y)
             lo, hi = bootstrap_ci_single(x, y, rho_hat, n_boot=n_boot,
                                           alpha=alpha, rng=boot_rng)

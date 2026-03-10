@@ -67,7 +67,8 @@ from config import CASES, POWER_TIERS, CI_TIERS, N_PRE_BENCH, N_PRE_TIERS
 from power_simulation import min_detectable_rho, run_all_scenarios
 from confidence_interval_calculator import bootstrap_ci_averaged, run_all_ci_scenarios
 from data_generator import digitized_available, warm_calibration_cache
-from permutation_pvalue import warm_precomputed_null_cache
+from permutation_pvalue import warm_precomputed_null_cache, _NULL_CACHE
+from power_asymptotic import get_x_counts
 
 # Constants (self-contained; do not import from benchmark script)
 N_GRID_SCENARIOS = 88
@@ -256,7 +257,7 @@ def main():
     # that triggers a UserWarning. We suppress it here because the warmup is only for JIT
     # compilation — we never use the warmup result. If you see the warning elsewhere it is
     # harmless; it just means that run hit the boundary.
-    print("Warming up (JIT + one small run per generator used)...")
+    print("Warming up (Numba/JIT by one small run per generator used)...")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if mode in ("power", "both"):
@@ -279,7 +280,21 @@ def main():
                     n_single, N_DISTINCT_SINGLE, DIST_TYPE_SINGLE, rho_obs, y_params,
                     generator=proxy, n_reps=5, n_boot=10, seed=0,
                     batch_bootstrap=True, calibration_mode="multipoint")
-    print("Warmup done.")
+    print("Numba/JIT warmup done.")
+
+    # The JIT warmup built a null cache entry for the warmup scenario; remove
+    # it so the "warm all 88" step builds all 88 from cold (consistent timing).
+    # Same principle as n_cal=1 for calibration: warmup should not pollute
+    # the production cache.  Here we pop explicitly because estimate_power
+    # doesn't expose n_pre, so we can't use a distinct key at call time.
+    _warmup_x_counts = get_x_counts(n_single, N_DISTINCT_SINGLE,
+                                    distribution_type=DIST_TYPE_SINGLE,
+                                    all_distinct=False)
+    _NULL_CACHE.pop(
+        (n_single, False,
+         tuple(int(c) for c in _warmup_x_counts),
+         N_PRE_BENCH),
+        None)
 
     # Pre-warm caches for all 88 scenarios so grid runs measure simulation
     # cost only, not one-time cache-building overhead.  Time both null and

@@ -346,7 +346,9 @@ def generate_y_copula(x, rho_s, y_params, rng=None):
         rng = np.random.default_rng()
 
     n = len(x)
-    rho_p = _spearman_to_pearson(rho_s)
+    # Clip Pearson after converting (matches _eval_mean_rho_copula_fast and the linear path).
+    # TODO: consider removing silent clip in favour of ValueError for abs(rho_s) > 1.
+    rho_p = np.clip(_spearman_to_pearson(rho_s), -0.999, 0.999)
 
     ranks_x = rankdata(x, method="average")
     u_x = (ranks_x - 0.5) / n
@@ -737,7 +739,12 @@ def _eval_mean_rho_copula_fast(rho_in, z_x_batch, noise_batch, x_ranks_batch):
     so Spearman(x, y) = Spearman(x, z_y).  No norm.cdf, lognormal quantile,
     or y_params needed.
     """
-    rho_p = _spearman_to_pearson(np.clip(rho_in, -0.999, 0.999))
+    # Clip Pearson after converting (matches generate_y_copula / generate_y_copula_batch).
+    # The sqrt guard below makes the clip numerically unnecessary for valid inputs
+    # (rho_s in [-1, 1] maps to rho_p in [-1, 1]).  It is kept for consistency with
+    # the linear path.  TODO: consider removing all silent clips here and in the
+    # generators in favour of an explicit ValueError for abs(rho_s) > 1.
+    rho_p = np.clip(_spearman_to_pearson(rho_in), -0.999, 0.999)
     z_y = rho_p * z_x_batch + np.sqrt(max(1.0 - rho_p ** 2, 0.0)) * noise_batch
     ry = _rank_rows(z_y)
     rhos = _pearson_on_rank_arrays(x_ranks_batch, ry)
@@ -777,6 +784,92 @@ def _bisect_for_probe_copula(probe, template, n_cal, seed,
     # plateau when step discontinuities are present (heavily tied x).
     val_lo = _eval_mean_rho_copula_fast(lo, *arrays)
     val_hi = _eval_mean_rho_copula_fast(hi, *arrays)
+    return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
+
+
+def _precompute_calibration_arrays_linear(template, n_cal, seed):
+    """Precompute rho-independent arrays for linear-model calibration.
+
+    The linear model produces log_y = mu + rho_p * sigma * x_std + sigma * sqrt(1-rho_p^2) * z,
+    where rho_p = _spearman_to_pearson(rho_in) and x_std = (x - mean) / std.
+    Since exp is strictly increasing, rank(y) = rank(log_y), and sigma cancels from
+    ranks, so: rank(log_y) = rank(rho_p * x_std + sqrt(1-rho_p^2) * z).
+
+    y_params are not needed for calibration (sigma only scales, does not change ranks).
+
+    Returns (x_std_batch, z_noise_batch, x_ranks_batch).
+      x_std_batch   : (n_cal, n) standardized x values per row
+      z_noise_batch : (n_cal, n) iid standard normal draws (rho-independent)
+      x_ranks_batch : (n_cal, n) midranks of x (for Pearson-on-ranks)
+    """
+    cal_rng = np.random.default_rng(seed)
+    n = len(template)
+
+    x_batch = np.tile(template, (n_cal, 1))
+    if hasattr(cal_rng, 'permuted'):
+        x_batch = cal_rng.permuted(x_batch, axis=1)
+    else:
+        perm = np.argsort(cal_rng.random((n_cal, n)), axis=1)
+        x_batch = np.take_along_axis(x_batch, perm, axis=1)
+
+    x_ranks_batch = _rank_rows(x_batch)
+
+    # Standardized x values (not ranks — this is the key difference from copula)
+    x_std_batch = x_batch - x_batch.mean(axis=1, keepdims=True)
+    sx = x_std_batch.std(axis=1, keepdims=True, ddof=0)
+    # Degenerate rows (all-identical x): fall back to zero; mixed will be pure noise
+    sx = np.where(sx > 1e-12, sx, 1.0)
+    x_std_batch = x_std_batch / sx
+
+    z_noise_batch = cal_rng.standard_normal((n_cal, n))
+
+    return x_std_batch, z_noise_batch, x_ranks_batch
+
+
+def _eval_mean_rho_linear_fast(rho_in, x_std_batch, z_noise_batch, x_ranks_batch):
+    """Fast mean Spearman rho for the linear model exploiting rank(y) = rank(log_y).
+
+    Applies _spearman_to_pearson to rho_in then clips the *Pearson* result,
+    matching generate_y_linear's internal order (convert then clip).
+    No exp or y_params needed.
+    """
+    rho_p = np.clip(_spearman_to_pearson(rho_in), -0.999, 0.999)
+    mixed = rho_p * x_std_batch + np.sqrt(max(1.0 - rho_p ** 2, 0.0)) * z_noise_batch
+    ry = _rank_rows(mixed)
+    rhos = _pearson_on_rank_arrays(x_ranks_batch, ry)
+    return float(np.mean(rhos))
+
+
+def _bisect_for_probe_linear(probe, template, n_cal, seed,
+                              n_iter=25, tol=5e-5):
+    """Bisect to find rho_in such that E[Spearman_linear(rho_in)] ≈ probe.
+
+    Precomputes rho-independent arrays once (x_std, noise), then calls
+    _eval_mean_rho_linear_fast for each bisection step (~27×).
+    Returns rho_in (float) or None if the probe is unreachable.
+    """
+    arrays = _precompute_calibration_arrays_linear(template, n_cal, seed)
+
+    lo, hi = 0.0, min(probe * 2.0, 0.999)
+    val_hi = _eval_mean_rho_linear_fast(hi, *arrays)
+    if val_hi < probe:
+        hi = 0.999
+        val_hi = _eval_mean_rho_linear_fast(hi, *arrays)
+    if val_hi < probe:
+        return None
+
+    for _ in range(n_iter):
+        mid = (lo + hi) / 2.0
+        observed = _eval_mean_rho_linear_fast(mid, *arrays)
+        if observed < probe:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+
+    val_lo = _eval_mean_rho_linear_fast(lo, *arrays)
+    val_hi = _eval_mean_rho_linear_fast(hi, *arrays)
     return hi if abs(val_hi - probe) <= abs(val_lo - probe) else lo
 
 
@@ -982,6 +1075,55 @@ def _calibrate_rho_multipoint_copula(n, n_distinct, distribution_type, rho_targe
     return float(np.clip(sign * result, -0.999, 0.999))
 
 
+_CALIBRATION_CACHE_MULTIPOINT_LINEAR = {}
+
+
+def _calibrate_rho_multipoint_linear(n, n_distinct, distribution_type, rho_target,
+                                      all_distinct=False, n_cal=300,
+                                      seed=99, freq_dict=None):
+    """Multi-point calibration for the linear model: probe at 5 rho values, interpolate.
+
+    Cache key excludes y_params: rank(log_y) is independent of sigma_ln and mu_ln
+    (scaling and shift do not change ranks), so the calibration curve depends
+    only on (n, template, seed, n_cal).
+    """
+    cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal,
+                 "multipoint")
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_MULTIPOINT_LINEAR:
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                    freq_dict, all_distinct)
+        pairs = []
+        for probe in _MULTIPOINT_PROBES:
+            rho_in = _bisect_for_probe_linear(probe, template, n_cal, seed)
+            if rho_in is not None:
+                pairs.append((probe, rho_in))
+
+        _CALIBRATION_CACHE_MULTIPOINT_LINEAR[cache_key] = pairs
+
+    pairs = sorted(_CALIBRATION_CACHE_MULTIPOINT_LINEAR[cache_key], key=lambda p: p[0])
+
+    if not pairs:
+        return float(np.clip(rho_target, -0.999, 0.999))
+
+    abs_target = abs(rho_target)
+    sign = 1.0 if rho_target >= 0 else -1.0
+
+    if len(pairs) == 1:
+        probe, rho_in = pairs[0]
+        ratio = rho_in / probe
+        result = abs_target * ratio
+    else:
+        probes = [p for p, _ in pairs]
+        rho_ins = [r for _, r in pairs]
+        result = _interp_with_extrapolation(abs_target, probes, rho_ins)
+
+    return float(np.clip(sign * result, -0.999, 0.999))
+
+
 def calibrate_rho(n, n_distinct, distribution_type, rho_target, y_params,
                   all_distinct=False, n_cal=300, seed=99, freq_dict=None,
                   calibration_mode="multipoint"):
@@ -1143,6 +1285,66 @@ def calibrate_rho_copula(n, n_distinct, distribution_type, rho_target, y_params,
         _CALIBRATION_CACHE_COPULA[cache_key] = ratio
 
     ratio = _CALIBRATION_CACHE_COPULA[cache_key]
+    result = rho_target * ratio
+    return float(np.clip(result, -0.999, 0.999))
+
+
+_CALIBRATION_CACHE_LINEAR = {}
+
+
+def calibrate_rho_linear(n, n_distinct, distribution_type, rho_target, y_params,
+                          all_distinct=False, n_cal=300, seed=99, freq_dict=None,
+                          calibration_mode="multipoint"):
+    """Find the input rho_s for the linear model that produces E[Spearman] = rho_target.
+
+    The linear model uses standardized x values (not rank quantiles), which
+    causes tie-structure-dependent attenuation.  Calibration corrects this by
+    finding rho_in such that E[Spearman(x, generate_y_linear(x, rho_in))] =
+    rho_target.
+
+    Uses the same fast-path as the copula: rank(y) = rank(log_y) (exp is
+    strictly increasing), so calibration operates entirely on ranks without
+    generating y values.  y_params are not needed.
+
+    Parameters
+    ----------
+    y_params : dict
+        Retained for API compatibility; not used in calibration.
+    calibration_mode : str
+        "multipoint" (default) probes at 5 rho values and interpolates;
+        "single" bisects at probe rho=0.30 and applies a linear ratio.
+
+    Returns
+    -------
+    float
+        Calibrated input rho_s to feed into generate_y_linear.
+    """
+    if abs(rho_target) < 1e-12:
+        return 0.0
+
+    if calibration_mode == "multipoint":
+        return _calibrate_rho_multipoint_linear(
+            n, n_distinct, distribution_type, rho_target,
+            all_distinct=all_distinct, n_cal=n_cal, seed=seed,
+            freq_dict=freq_dict)
+
+    # --- single-point fast path ---
+    cache_key = (n, n_distinct, distribution_type, all_distinct, n_cal)
+    if freq_dict is not None:
+        counts = tuple(freq_dict[n][n_distinct]["custom"])
+        cache_key = cache_key + (counts,)
+
+    if cache_key not in _CALIBRATION_CACHE_LINEAR:
+        probe = 0.30
+        template = _get_x_template(n, n_distinct, distribution_type,
+                                    freq_dict, all_distinct)
+        calibrated_probe = _bisect_for_probe_linear(probe, template, n_cal, seed)
+        if calibrated_probe is None:
+            calibrated_probe = probe
+        ratio = calibrated_probe / probe if probe > 0 else 1.0
+        _CALIBRATION_CACHE_LINEAR[cache_key] = ratio
+
+    ratio = _CALIBRATION_CACHE_LINEAR[cache_key]
     result = rho_target * ratio
     return float(np.clip(result, -0.999, 0.999))
 
@@ -1403,7 +1605,7 @@ def warm_calibration_cache(generator, y_params=None, cases=None,
     Parameters
     ----------
     generator : str
-        'nonparametric', 'copula', or 'empirical'. Linear has no calibration.
+        'nonparametric', 'copula', 'empirical', or 'linear'.
     y_params : dict or None
         Accepted for backwards compatibility but not used. The function
         constructs y_params from each case dict internally.
@@ -1434,9 +1636,6 @@ def warm_calibration_cache(generator, y_params=None, cases=None,
     if dist_types is None:
         dist_types = DISTRIBUTION_TYPES
 
-    if generator == "linear":
-        return 0
-
     probe_rho = 0.30
     built = 0
 
@@ -1463,6 +1662,11 @@ def warm_calibration_cache(generator, y_params=None, cases=None,
                                            all_distinct=False, n_cal=n_cal,
                                            seed=seed, freq_dict=freq_dict,
                                            calibration_mode=calibration_mode)
+                elif generator == "linear":
+                    calibrate_rho_linear(n, k, dt, probe_rho, case_y_params,
+                                        all_distinct=False, n_cal=n_cal,
+                                        seed=seed, freq_dict=freq_dict,
+                                        calibration_mode=calibration_mode)
                 built += 1
 
         # All-distinct scenario
@@ -1479,20 +1683,26 @@ def warm_calibration_cache(generator, y_params=None, cases=None,
             calibrate_rho_empirical(n, n, None, probe_rho, pool,
                                    all_distinct=True, n_cal=n_cal, seed=seed,
                                    calibration_mode=calibration_mode)
+        elif generator == "linear":
+            calibrate_rho_linear(n, n, None, probe_rho, case_y_params,
+                                 all_distinct=True, n_cal=n_cal, seed=seed,
+                                 calibration_mode=calibration_mode)
         built += 1
 
     return built
 
 
 def get_calibration_cache_snapshots():
-    """Return shallow copies of all 6 calibration caches for passing to joblib workers."""
+    """Return shallow copies of all 8 calibration caches for passing to joblib workers."""
     return {
         "mp":     dict(_CALIBRATION_CACHE_MULTIPOINT),
         "mp_cop": dict(_CALIBRATION_CACHE_MULTIPOINT_COPULA),
         "mp_emp": dict(_CALIBRATION_CACHE_MULTIPOINT_EMP),
+        "mp_lin": dict(_CALIBRATION_CACHE_MULTIPOINT_LINEAR),
         "sp":     dict(_CALIBRATION_CACHE),
         "sp_cop": dict(_CALIBRATION_CACHE_COPULA),
         "sp_emp": dict(_CALIBRATION_CACHE_EMP),
+        "sp_lin": dict(_CALIBRATION_CACHE_LINEAR),
     }
 
 
@@ -1563,9 +1773,11 @@ def load_calibration_caches_from_disk(path, n_cal) -> bool:
     _CALIBRATION_CACHE_MULTIPOINT.update(snaps["mp"])
     _CALIBRATION_CACHE_MULTIPOINT_COPULA.update(snaps["mp_cop"])
     _CALIBRATION_CACHE_MULTIPOINT_EMP.update(snaps["mp_emp"])
+    _CALIBRATION_CACHE_MULTIPOINT_LINEAR.update(snaps.get("mp_lin", {}))
     _CALIBRATION_CACHE.update(snaps["sp"])
     _CALIBRATION_CACHE_COPULA.update(snaps["sp_cop"])
     _CALIBRATION_CACHE_EMP.update(snaps["sp_emp"])
+    _CALIBRATION_CACHE_LINEAR.update(snaps.get("sp_lin", {}))
     return True
 
 
@@ -1707,7 +1919,9 @@ def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None, _return_ranks=Fa
     if rng is None:
         rng = np.random.default_rng()
     n_sims, n = x_batch.shape
-    rho_p = _spearman_to_pearson(rho_s)
+    # Clip Pearson after converting (matches _eval_mean_rho_copula_fast and the linear path).
+    # TODO: consider removing silent clip in favour of ValueError for abs(rho_s) > 1.
+    rho_p = np.clip(_spearman_to_pearson(rho_s), -0.999, 0.999)
 
     ranks_x = _rank_rows(x_batch)                               # (n_sims, n)
     u_x = (ranks_x - 0.5) / n
