@@ -453,16 +453,14 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
             scenario_idx += 1
 
     # Disk cache load (before pre_warm so pre_warm is instant on a hit).
-    _cal_loaded = False
-    _null_loaded = False
     _cal_path = None
     _null_path = None
     if disk_cache_dir is not None:
         _cal_path = Path(disk_cache_dir) / f"calibration_ncal{n_cal}.pkl"
-        _cal_loaded = load_calibration_caches_from_disk(_cal_path, n_cal)
+        load_calibration_caches_from_disk(_cal_path, n_cal)
         if USE_PERMUTATION_PVALUE:
             _null_path = Path(disk_cache_dir) / f"null_npre{PVALUE_PRECOMPUTED_N_PRE}.pkl"
-            _null_loaded = load_null_cache_from_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
+            load_null_cache_from_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
 
     if n_jobs == 1:
         if pre_warm:
@@ -481,9 +479,8 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
         results = [_power_one_scenario(*args) for args in scenarios]
         _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
         if disk_cache_dir is not None and _save and pre_warm:
-            if not _cal_loaded:
-                save_calibration_caches_to_disk(_cal_path, n_cal)
-            if USE_PERMUTATION_PVALUE and not _null_loaded:
+            save_calibration_caches_to_disk(_cal_path, n_cal)
+            if USE_PERMUTATION_PVALUE:
                 save_null_cache_to_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
         return results
 
@@ -516,9 +513,8 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
 
     _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
     if disk_cache_dir is not None and _save and pre_warm:
-        if not _cal_loaded:
-            save_calibration_caches_to_disk(_cal_path, n_cal)
-        if USE_PERMUTATION_PVALUE and not _null_loaded:
+        save_calibration_caches_to_disk(_cal_path, n_cal)
+        if USE_PERMUTATION_PVALUE:
             save_null_cache_to_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
 
     return results

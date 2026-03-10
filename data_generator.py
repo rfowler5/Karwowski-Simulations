@@ -1720,19 +1720,88 @@ def compute_config_hash() -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
 
 
-def save_calibration_caches_to_disk(path, n_cal):
-    """Persist all 6 calibration caches to a pickle file.
+def _cal_key_to_disk_key(key):
+    """Strip an in-memory calibration key to a bulletproof disk key.
 
-    The file includes metadata (n_cal, config hash) so that
-    load_calibration_caches_from_disk() can detect stale files.
+    Disk keys are self-describing: non-all_distinct entries always carry
+    counts_tuple so that a FREQ_DICT change for an existing dist_type
+    produces a new key rather than a silent collision.
+
+    In-memory key shapes (both mp and sp; emp prefix is stripped here):
+      mp nonparametric/copula/linear: (n, k, dt, all_distinct, n_cal, "multipoint"[, counts])
+      sp nonparametric/copula/linear: (n, k, dt, all_distinct, n_cal[, counts])
+      mp empirical:  ("emp", n, k, dt, all_distinct, n_cal, "multipoint"[, counts])
+      sp empirical:  ("emp", n, k, dt, all_distinct, n_cal[, counts])
+
+    Disk key shapes:
+      all_distinct:  (n, k, None, True)
+      standard dt:   (n, k, dt,   False, counts_tuple)
+      custom dt:     (n, k, "custom", False, counts_tuple)
+    """
+    start = 1 if key[0] == "emp" else 0
+    scenario = key[start:start + 4]  # (n, k, dt, all_distinct)
+    n, n_distinct, dist_type, all_distinct = scenario
+    if all_distinct:
+        return scenario
+    if isinstance(key[-1], tuple):
+        return scenario + (key[-1],)
+    counts = tuple(FREQ_DICT[n][n_distinct][dist_type])
+    return scenario + (counts,)
+
+
+def _disk_key_to_cal_key(disk_key, n_cal, cache_label):
+    """Reconstruct an in-memory calibration key from a disk key + metadata.
+
+    Parameters
+    ----------
+    disk_key : tuple
+        Bulletproof disk key as written by _cal_key_to_disk_key.
+    n_cal : int
+        Calibration sample count stored in file metadata.
+    cache_label : str
+        One of "mp", "mp_cop", "mp_emp", "mp_lin", "sp", "sp_cop", "sp_emp", "sp_lin".
+    """
+    n, n_distinct, dist_type, all_distinct = disk_key[:4]
+    has_counts = len(disk_key) > 4
+    counts_tuple = disk_key[4] if has_counts else None
+
+    is_emp = "emp" in cache_label
+    is_mp = cache_label.startswith("mp")
+
+    prefix = ("emp",) if is_emp else ()
+    base = (n, n_distinct, dist_type, all_distinct)
+    computation = (n_cal, "multipoint") if is_mp else (n_cal,)
+
+    if dist_type == "custom" and counts_tuple is not None:
+        return prefix + base + computation + (counts_tuple,)
+    return prefix + base + computation
+
+
+def save_calibration_caches_to_disk(path, n_cal):
+    """Persist all 8 calibration caches to a pickle file.
+
+    Keys are stripped to bulletproof disk keys via _cal_key_to_disk_key so
+    that FREQ_DICT changes for existing dist types produce new keys instead
+    of silent collisions.  Metadata includes multipoint_probes (the format
+    marker) and a soft config_hash for change detection.
+
     Creates the parent directory if it does not exist.
     """
     import os
     import pickle
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    snaps = get_calibration_cache_snapshots()
+    disk_caches = {
+        label: {_cal_key_to_disk_key(k): v for k, v in cache.items()}
+        for label, cache in snaps.items()
+    }
     payload = {
-        "metadata": {"n_cal": n_cal, "config_hash": compute_config_hash()},
-        "caches": get_calibration_cache_snapshots(),
+        "metadata": {
+            "n_cal": n_cal,
+            "multipoint_probes": tuple(_MULTIPOINT_PROBES),
+            "config_hash": compute_config_hash(),
+        },
+        "caches": disk_caches,
     }
     with open(path, "wb") as f:
         pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1741,8 +1810,14 @@ def save_calibration_caches_to_disk(path, n_cal):
 def load_calibration_caches_from_disk(path, n_cal) -> bool:
     """Load calibration caches from a pickle file into the module-level dicts.
 
-    Returns True on success.  Returns False (with a UserWarning) if the file
-    is missing or its metadata does not match the current n_cal / config grid.
+    Validation cascade:
+    1. multipoint_probes absent → reject (unrecognized/old format).
+    2. n_cal mismatch → reject (hard).
+    3. multipoint_probes value mismatch → skip mp_* dicts, load sp_* only.
+    4. config_hash mismatch → warn and continue (soft).
+
+    Returns True on any successful load (even partial: mp skipped, sp loaded).
+    Returns False only if the file is missing or fails hard validation.
     """
     import pickle
     import warnings
@@ -1752,7 +1827,18 @@ def load_calibration_caches_from_disk(path, n_cal) -> bool:
     except FileNotFoundError:
         return False
     meta = payload["metadata"]
-    current_hash = compute_config_hash()
+
+    # 1. Format gate: multipoint_probes presence is the new-format marker.
+    if "multipoint_probes" not in meta:
+        warnings.warn(
+            "Calibration cache file uses unrecognized format. "
+            "Please rebuild with `scripts/precompute_caches.py`.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+
+    # 2. n_cal hard check.
     if meta["n_cal"] != n_cal:
         warnings.warn(
             f"Disk calibration cache has n_cal={meta['n_cal']} but "
@@ -1761,24 +1847,138 @@ def load_calibration_caches_from_disk(path, n_cal) -> bool:
             stacklevel=2,
         )
         return False
-    if meta["config_hash"] != current_hash:
+
+    # 3. multipoint_probes per-mode check.
+    load_mp = tuple(meta["multipoint_probes"]) == tuple(_MULTIPOINT_PROBES)
+    if not load_mp:
         warnings.warn(
-            "Disk calibration cache config hash mismatch (CASES/FREQ_DICT/grid changed) "
-            "— ignoring disk cache, recomputing in-process.",
+            "Disk calibration cache multipoint_probes mismatch — "
+            "skipping multipoint dicts, loading single-point dicts only.",
             UserWarning,
             stacklevel=2,
         )
-        return False
-    snaps = payload["caches"]
-    _CALIBRATION_CACHE_MULTIPOINT.update(snaps["mp"])
-    _CALIBRATION_CACHE_MULTIPOINT_COPULA.update(snaps["mp_cop"])
-    _CALIBRATION_CACHE_MULTIPOINT_EMP.update(snaps["mp_emp"])
-    _CALIBRATION_CACHE_MULTIPOINT_LINEAR.update(snaps.get("mp_lin", {}))
-    _CALIBRATION_CACHE.update(snaps["sp"])
-    _CALIBRATION_CACHE_COPULA.update(snaps["sp_cop"])
-    _CALIBRATION_CACHE_EMP.update(snaps["sp_emp"])
-    _CALIBRATION_CACHE_LINEAR.update(snaps.get("sp_lin", {}))
+
+    # 4. config_hash soft check — warn but continue.
+    current_hash = compute_config_hash()
+    if meta.get("config_hash") != current_hash:
+        warnings.warn(
+            "Disk calibration cache config hash mismatch (CASES/FREQ_DICT/grid changed) "
+            "— proceeding with loaded data.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    disk_caches = payload["caches"]
+    cache_map = {
+        "mp":     _CALIBRATION_CACHE_MULTIPOINT,
+        "mp_cop": _CALIBRATION_CACHE_MULTIPOINT_COPULA,
+        "mp_emp": _CALIBRATION_CACHE_MULTIPOINT_EMP,
+        "mp_lin": _CALIBRATION_CACHE_MULTIPOINT_LINEAR,
+        "sp":     _CALIBRATION_CACHE,
+        "sp_cop": _CALIBRATION_CACHE_COPULA,
+        "sp_emp": _CALIBRATION_CACHE_EMP,
+        "sp_lin": _CALIBRATION_CACHE_LINEAR,
+    }
+
+    labels_to_load = []
+    if load_mp:
+        labels_to_load += ["mp", "mp_cop", "mp_emp", "mp_lin"]
+    labels_to_load += ["sp", "sp_cop", "sp_emp", "sp_lin"]
+
+    for label in labels_to_load:
+        mem_cache = cache_map[label]
+        for disk_key, value in disk_caches.get(label, {}).items():
+            mem_key = _disk_key_to_cal_key(disk_key, n_cal, label)
+            mem_cache[mem_key] = value
+
     return True
+
+
+def cleanup_stale_calibration_entries(path, n_cal, dry_run=False):
+    """Remove calibration entries whose counts_tuple no longer matches FREQ_DICT.
+
+    A stale entry is a non-all_distinct entry for a standard dist_type whose
+    stored counts_tuple differs from the current FREQ_DICT[n][k][dt].  Entries
+    for all_distinct or dist_type=="custom" are never flagged (can't validate
+    automatically).
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a calibration_ncal*.pkl file.
+    n_cal : int
+        Must match the file's metadata n_cal (hard).
+    dry_run : bool
+        If True, report stale entries without modifying the file.
+
+    Returns
+    -------
+    dict with keys:
+        "stale"  : list of (cache_label, disk_key) tuples
+        "kept"   : int
+        "total"  : int
+    """
+    import pickle
+    import warnings
+    path = str(path)
+    try:
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+    except FileNotFoundError:
+        return {"stale": [], "kept": 0, "total": 0}
+
+    meta = payload["metadata"]
+    if "multipoint_probes" not in meta:
+        warnings.warn(
+            "cleanup_stale_calibration_entries: file uses unrecognized format, skipping.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return {"stale": [], "kept": 0, "total": 0}
+    if meta["n_cal"] != n_cal:
+        warnings.warn(
+            f"cleanup_stale_calibration_entries: file n_cal={meta['n_cal']} != {n_cal}, skipping.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return {"stale": [], "kept": 0, "total": 0}
+
+    disk_caches = payload["caches"]
+    stale = []
+    total = 0
+
+    for label, cache in disk_caches.items():
+        for disk_key in list(cache.keys()):
+            total += 1
+            if len(disk_key) < 4:
+                continue
+            n, n_distinct, dist_type, all_distinct = disk_key[:4]
+            if all_distinct:
+                continue
+            if dist_type == "custom":
+                continue
+            if len(disk_key) <= 4:
+                # Old format without counts — treat as stale; can't validate.
+                stale.append((label, disk_key))
+                continue
+            counts_tuple = disk_key[4]
+            try:
+                current_counts = tuple(FREQ_DICT[n][n_distinct][dist_type])
+            except KeyError:
+                # Scenario removed from grid: conservative — leave it alone.
+                continue
+            if current_counts != counts_tuple:
+                stale.append((label, disk_key))
+
+    kept = total - len(stale)
+
+    if not dry_run and stale:
+        for label, disk_key in stale:
+            disk_caches[label].pop(disk_key, None)
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    return {"stale": stale, "kept": kept, "total": total}
 
 
 def generate_y_nonparametric(x, rho_s, y_params, rng=None,

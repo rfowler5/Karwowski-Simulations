@@ -14,6 +14,8 @@ Options
     --n-pre       INT   permutations per null entry (default: config PVALUE_PRECOMPUTED_N_PRE)
     --n-jobs      INT   parallel workers (default: 1)
     --output-dir  PATH  directory to write .pkl files (default: cache/)
+    --cleanup           scan output-dir and remove stale cache entries
+    --dry-run           used with --cleanup: report without modifying
 
 Output files
 ------------
@@ -76,13 +78,28 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _calibration_worker(generator, cases_subset, n_distinct_values,
-                        dist_types, calibration_mode, n_cal, seed):
-    """Build calibration cache for a subset of cases, return snapshots."""
+                        dist_types, calibration_mode, n_cal, seed,
+                        initial_snapshot=None):
+    """Build calibration cache for a subset of cases, return snapshots.
+
+    When initial_snapshot is provided (load-before-warm path), the worker
+    pre-loads the snapshot so warm_calibration_cache only computes misses.
+    """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+    import data_generator as _dg
     from data_generator import (warm_calibration_cache,
                                 get_calibration_cache_snapshots)
+    if initial_snapshot is not None:
+        _dg._CALIBRATION_CACHE_MULTIPOINT.update(initial_snapshot.get("mp", {}))
+        _dg._CALIBRATION_CACHE_MULTIPOINT_COPULA.update(initial_snapshot.get("mp_cop", {}))
+        _dg._CALIBRATION_CACHE_MULTIPOINT_EMP.update(initial_snapshot.get("mp_emp", {}))
+        _dg._CALIBRATION_CACHE_MULTIPOINT_LINEAR.update(initial_snapshot.get("mp_lin", {}))
+        _dg._CALIBRATION_CACHE.update(initial_snapshot.get("sp", {}))
+        _dg._CALIBRATION_CACHE_COPULA.update(initial_snapshot.get("sp_cop", {}))
+        _dg._CALIBRATION_CACHE_EMP.update(initial_snapshot.get("sp_emp", {}))
+        _dg._CALIBRATION_CACHE_LINEAR.update(initial_snapshot.get("sp_lin", {}))
     warm_calibration_cache(
         generator,
         cases=cases_subset,
@@ -95,12 +112,20 @@ def _calibration_worker(generator, cases_subset, n_distinct_values,
     return get_calibration_cache_snapshots()
 
 
-def _null_worker(cases_subset, n_distinct_values, dist_types, n_pre, seed):
-    """Build null cache for a subset of cases, return snapshot."""
+def _null_worker(cases_subset, n_distinct_values, dist_types, n_pre, seed,
+                 initial_snapshot=None):
+    """Build null cache for a subset of cases, return snapshot.
+
+    When initial_snapshot is provided (load-before-warm path), the worker
+    pre-loads the snapshot so warm_precomputed_null_cache only computes misses.
+    """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+    import permutation_pvalue as _pp
     from permutation_pvalue import warm_precomputed_null_cache, get_null_cache_snapshot
+    if initial_snapshot is not None:
+        _pp._NULL_CACHE.update(initial_snapshot)
     warm_precomputed_null_cache(
         cases=cases_subset,
         n_distinct_values=n_distinct_values,
@@ -173,6 +198,77 @@ def _fmt_size(path):
 
 
 # ---------------------------------------------------------------------------
+# Cleanup helper
+# ---------------------------------------------------------------------------
+
+def _run_cleanup(args, project_root):
+    """Scan output-dir for calibration / null pkl files and purge stale entries."""
+    import re
+
+    output_dir = Path(args.output_dir)
+    dry_run = args.dry_run
+
+    from data_generator import cleanup_stale_calibration_entries
+    from permutation_pvalue import cleanup_stale_null_entries
+
+    if dry_run:
+        print("Dry-run mode: no files will be modified.\n")
+
+    cal_files = sorted(output_dir.glob("calibration_ncal*.pkl"))
+    null_files = sorted(output_dir.glob("null_npre*.pkl"))
+
+    if not cal_files and not null_files:
+        print(f"No calibration or null cache files found in {output_dir.resolve()}.")
+        return
+
+    total_removed = 0
+
+    for cal_file in cal_files:
+        m = re.search(r"calibration_ncal(\d+)\.pkl$", cal_file.name)
+        if not m:
+            continue
+        n_cal = int(m.group(1))
+        size_before = os.path.getsize(cal_file)
+        result = cleanup_stale_calibration_entries(cal_file, n_cal, dry_run=dry_run)
+        n_stale = len(result["stale"])
+        total_removed += n_stale
+        if n_stale:
+            size_after = os.path.getsize(cal_file) if not dry_run else size_before
+            delta = size_before - size_after
+            verb = "Would remove" if dry_run else "Removed"
+            print(
+                f"{cal_file.name}: {verb} {n_stale} stale / {result['total']} total entries "
+                f"({result['kept']} kept)"
+                + (f", saved {delta / 1024:.1f} KB" if not dry_run else "")
+            )
+        else:
+            print(f"{cal_file.name}: no stale entries ({result['total']} total)")
+
+    for null_file in null_files:
+        m = re.search(r"null_npre(\d+)\.pkl$", null_file.name)
+        if not m:
+            continue
+        n_pre = int(m.group(1))
+        size_before = os.path.getsize(null_file)
+        result = cleanup_stale_null_entries(null_file, n_pre, dry_run=dry_run)
+        n_stale = len(result["stale"])
+        total_removed += n_stale
+        if n_stale:
+            size_after = os.path.getsize(null_file) if not dry_run else size_before
+            delta = size_before - size_after
+            verb = "Would remove" if dry_run else "Removed"
+            print(
+                f"{null_file.name}: {verb} {n_stale} stale / {result['total']} total entries "
+                f"({result['kept']} kept)"
+                + (f", saved {delta / 1024:.1f} KB" if not dry_run else "")
+            )
+        else:
+            print(f"{null_file.name}: no stale entries ({result['total']} total)")
+
+    print(f"\nTotal {'would-be-removed' if dry_run else 'removed'}: {total_removed} entries.")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -219,6 +315,20 @@ def main():
         metavar="OUTPUT_DIR",
         help="Directory to write .pkl files (default: cache/)",
     )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help=(
+            "Scan all calibration_ncal*.pkl and null_npre*.pkl files in "
+            "--output-dir and remove entries stale relative to the current "
+            "config.  Combine with --dry-run to preview without modifying."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Used with --cleanup: report stale entries without modifying files.",
+    )
     args = parser.parse_args()
 
     # Parse --generators (comma-separated)
@@ -238,9 +348,15 @@ def main():
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
 
+    # --cleanup mode: scan output-dir and remove stale entries, then exit.
+    if args.cleanup:
+        _run_cleanup(args, project_root)
+        return
+
     from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                         N_CAL, CALIBRATION_MODE, PVALUE_PRECOMPUTED_N_PRE)
     from data_generator import (save_calibration_caches_to_disk,
+                                load_calibration_caches_from_disk,
                                 get_calibration_cache_snapshots,
                                 _CALIBRATION_CACHE_MULTIPOINT,
                                 _CALIBRATION_CACHE_MULTIPOINT_COPULA,
@@ -250,7 +366,9 @@ def main():
                                 _CALIBRATION_CACHE_COPULA,
                                 _CALIBRATION_CACHE_EMP,
                                 _CALIBRATION_CACHE_LINEAR)
-    from permutation_pvalue import save_null_cache_to_disk, _NULL_CACHE
+    from permutation_pvalue import (save_null_cache_to_disk,
+                                    load_null_cache_from_disk,
+                                    _NULL_CACHE)
     from power_simulation import min_detectable_rho
     from confidence_interval_calculator import bootstrap_ci_averaged
 
@@ -296,6 +414,13 @@ def main():
     print(f"Building calibration cache → {cal_path}")
     t0 = time.perf_counter()
 
+    # Load-before-warm: pre-populate caches from disk so warm only computes
+    # missing entries (critical for incremental updates / add-one-scenario).
+    if cal_path.exists():
+        with warnings.catch_warnings():
+            warnings.simplefilter("always")
+            load_calibration_caches_from_disk(cal_path, n_cal)
+
     if n_jobs == 1:
         from data_generator import warm_calibration_cache
         for gen in generators:
@@ -306,6 +431,8 @@ def main():
             )
         save_calibration_caches_to_disk(cal_path, n_cal)
     else:
+        # Capture loaded state to pass to workers so they skip already-computed entries.
+        loaded_cal_snapshot = get_calibration_cache_snapshots()
         for gen in generators:
             chunks = _partition_cases(CASES, n_jobs)
             futures_snapshots = []
@@ -320,6 +447,7 @@ def main():
                         CALIBRATION_MODE,
                         n_cal,
                         42 + i,
+                        loaded_cal_snapshot,
                     ): i
                     for i, chunk in enumerate(chunks)
                 }
@@ -351,11 +479,19 @@ def main():
         print(f"Building null cache → {null_path}")
         t1 = time.perf_counter()
 
+        # Load-before-warm for null cache as well.
+        if null_path.exists():
+            with warnings.catch_warnings():
+                warnings.simplefilter("always")
+                load_null_cache_from_disk(null_path, n_pre)
+
         if n_jobs == 1:
             from permutation_pvalue import warm_precomputed_null_cache
             warm_precomputed_null_cache(n_pre=n_pre)
             save_null_cache_to_disk(null_path, n_pre)
         else:
+            from permutation_pvalue import get_null_cache_snapshot
+            loaded_null_snapshot = get_null_cache_snapshot()
             chunks = _partition_cases(CASES, n_jobs)
             null_snapshots = []
             with ProcessPoolExecutor(max_workers=n_jobs) as pool:
@@ -367,6 +503,7 @@ def main():
                         DISTRIBUTION_TYPES,
                         n_pre,
                         42 + i,
+                        loaded_null_snapshot,
                     ): i
                     for i, chunk in enumerate(chunks)
                 }

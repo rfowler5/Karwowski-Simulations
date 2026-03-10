@@ -44,7 +44,9 @@ QUICK_TESTS = [
     # Precompute first: if the precompute/eval split is broken, later calibration tests
     # would all fail with the same root cause, making diagnosis harder.
     ("test_calibration_precompute.py", []),      # precompute/eval split unit tests; run before calibration_accuracy so failures pinpoint the refactored path
-    ("test_calibration_accuracy.py", None),      # filled in main() with CALIBRATION_QUICK_ARGV ± --strict; after precompute so a precompute bug is caught first
+    # This calibration accuracy test does a quick sweep over a bad scenario.
+    # These n-sims and n-cal were chosen because that's where it is known that they all currently pass--nothing flagged.
+    ("test_calibration_accuracy.py", ["--n-sims", "1000", "--n-cal", "2000", "--strict", "--case", "3", "--n-distinct", "4"]),      # filled in main() with CALIBRATION_QUICK_ARGV ± --strict; after precompute so a precompute bug is caught first
     ("test_calibration_symmetry.py", []),        # TEST-3: calibrate_rho(+rho) == -calibrate_rho(-rho); after accuracy so a broken table is caught before testing sign logic on top of it
 
     # --- Asymptotic formulas ---
@@ -60,6 +62,11 @@ QUICK_TESTS = [
     # longer empirical_generator test, so invalid_n gives the cleaner failure message.
     ("test_empirical_invalid_n.py", []),         # edge-case guard: empirical generator raises on n outside digitized data range
     ("test_empirical_generator.py", []),         # integration test for empirical generator output; after invalid_n
+
+    # --- Disk cache format ---
+    # Tests for bulletproof disk key helpers, save/load round-trip, validation cascade,
+    # save-condition fix, cleanup, and load-before-warm.  No MC, no disk I/O outside tmp.
+    ("test_cal_disk_cache.py", []),              # disk cache format: key helpers, round-trip, validation, cleanup
 
     # --- Permutation p-value ---
     # Independent of calibration and empirical generator; tests permutation_pvalue.py in isolation.
@@ -78,7 +85,7 @@ QUICK_TESTS = [
 ]
 
 FULL_ONLY_TESTS = [
-    # These two calibration accuracy tests do a full sweep over all the cases to spot potential areas of structural bias.
+    # This calibration accuracy test does a full sweep over all the cases to spot potential areas of structural bias.
     # These n-sims and n-cal were chosen because that's where it is known that they all currently pass--nothing flagged.
     ("test_calibration_accuracy.py", ["--n-sims", "1000", "--n-cal", "2000", "--strict"]),
     # These spawn subprocesses or run long MC loops; too slow for quick.

@@ -325,8 +325,10 @@ def get_null_cache_snapshot():
 def save_null_cache_to_disk(path, n_pre):
     """Persist the null cache to a pickle file.
 
-    The file includes metadata (n_pre, config hash) so that
-    load_null_cache_from_disk() can detect stale files.
+    The file includes metadata (n_pre, config hash, standard_keys) so that
+    load_null_cache_from_disk() can detect stale files and
+    cleanup_stale_null_entries() can distinguish standard entries from
+    custom-freq_dict entries.
     Creates the parent directory if it does not exist.
 
     Disk keys are scenario 3-tuples (n, all_distinct, x_counts_tuple),
@@ -336,13 +338,30 @@ def save_null_cache_to_disk(path, n_pre):
     """
     import os
     import pickle
+    from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
     from data_generator import compute_config_hash
+    from power_asymptotic import get_x_counts
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     snapshot = get_null_cache_snapshot()
     # Strip n_pre from in-memory keys; disk keys are scenario 3-tuples.
     disk_cache = {k[:3]: v for k, v in snapshot.items()}
+    # Record which keys were generated from the standard config grid so that
+    # cleanup_stale_null_entries can protect custom-freq_dict entries.
+    standard_keys = set()
+    for case in CASES.values():
+        n = case["n"]
+        for k in N_DISTINCT_VALUES:
+            for dt in DISTRIBUTION_TYPES:
+                xc = get_x_counts(n, k, distribution_type=dt)
+                standard_keys.add((n, False, tuple(int(c) for c in xc)))
+        xc_all = get_x_counts(n, n, all_distinct=True)
+        standard_keys.add((n, True, tuple(int(c) for c in xc_all)))
     payload = {
-        "metadata": {"n_pre": n_pre, "config_hash": compute_config_hash()},
+        "metadata": {
+            "n_pre": n_pre,
+            "config_hash": compute_config_hash(),
+            "standard_keys": standard_keys,
+        },
         "cache": disk_cache,
     }
     with open(path, "wb") as f:
@@ -353,7 +372,9 @@ def load_null_cache_from_disk(path, n_pre) -> bool:
     """Load the null cache from a pickle file into the module-level _NULL_CACHE.
 
     Returns True on success.  Returns False (with a UserWarning) if the file
-    is missing or its metadata does not match the current n_pre / config grid.
+    is missing or its metadata n_pre does not match.  A config_hash mismatch
+    triggers a warning but loading proceeds (soft check) because null disk
+    keys embed x_counts_tuple, making entries self-describing.
     """
     import pickle
     import warnings
@@ -376,11 +397,10 @@ def load_null_cache_from_disk(path, n_pre) -> bool:
     if meta["config_hash"] != current_hash:
         warnings.warn(
             "Disk null cache config hash mismatch (CASES/FREQ_DICT/grid changed) "
-            "— ignoring disk cache, recomputing in-process.",
+            "— proceeding with loaded data.",
             UserWarning,
             stacklevel=2,
         )
-        return False
     # Reconstruct in-memory 4-tuple keys from disk 3-tuple keys.
     # len(arr) == n_pre for every entry (validated by the metadata check above),
     # so the array is self-describing: no separate migration logic needed.
@@ -388,3 +408,98 @@ def load_null_cache_from_disk(path, n_pre) -> bool:
         full_key = scenario_key[:3] + (len(arr),)
         _NULL_CACHE[full_key] = arr
     return True
+
+
+def cleanup_stale_null_entries(path, n_pre, dry_run=False):
+    """Remove null cache entries whose x_counts_tuple no longer matches current config.
+
+    A stale entry is one whose (n, all_distinct, x_counts_tuple) key was saved
+    as a standard-grid entry (recorded in file metadata) but whose x_counts no
+    longer match any valid (n_distinct, dist_type) combination from the current
+    config grid (CASES × N_DISTINCT_VALUES × DISTRIBUTION_TYPES with default
+    FREQ_DICT).  Entries not recorded as standard (e.g. custom-freq_dict entries)
+    and entries for n values absent from current CASES are left untouched
+    (conservative).
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a null_npre*.pkl file.
+    n_pre : int
+        Must match the file's metadata n_pre (hard).
+    dry_run : bool
+        If True, report without modifying.
+
+    Returns
+    -------
+    dict with keys:
+        "stale"  : list of disk_key tuples
+        "kept"   : int
+        "total"  : int
+    """
+    import pickle
+    import warnings
+    from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
+    from power_asymptotic import get_x_counts
+
+    path = str(path)
+    try:
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+    except FileNotFoundError:
+        return {"stale": [], "kept": 0, "total": 0}
+
+    meta = payload["metadata"]
+    if meta["n_pre"] != n_pre:
+        warnings.warn(
+            f"cleanup_stale_null_entries: file n_pre={meta['n_pre']} != {n_pre}, skipping.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return {"stale": [], "kept": 0, "total": 0}
+
+    # Build the set of valid (n, all_distinct, x_counts_tuple) triples from
+    # the current config.
+    valid_keys = set()
+    for case in CASES.values():
+        n = case["n"]
+        for k in N_DISTINCT_VALUES:
+            for dt in DISTRIBUTION_TYPES:
+                xc = get_x_counts(n, k, distribution_type=dt)
+                valid_keys.add((n, False, tuple(int(c) for c in xc)))
+        xc_all = get_x_counts(n, n, all_distinct=True)
+        valid_keys.add((n, True, tuple(int(c) for c in xc_all)))
+
+    # Build the set of n values present in current CASES.
+    current_ns = {case["n"] for case in CASES.values()}
+
+    # standard_keys recorded at save time: only entries in this set can be
+    # flagged stale.  Entries absent from standard_keys (e.g. custom-freq_dict
+    # entries) are left untouched.
+    file_standard_keys = meta.get("standard_keys")
+
+    disk_cache = payload["cache"]
+    stale = []
+    total = len(disk_cache)
+
+    for disk_key in list(disk_cache.keys()):
+        n = disk_key[0]
+        if n not in current_ns:
+            # n no longer in CASES at all: conservative, skip.
+            continue
+        if disk_key in valid_keys:
+            continue
+        if file_standard_keys is not None and disk_key not in file_standard_keys:
+            # Not a standard entry — could be custom; leave it alone.
+            continue
+        stale.append(disk_key)
+
+    kept = total - len(stale)
+
+    if not dry_run and stale:
+        for disk_key in stale:
+            disk_cache.pop(disk_key, None)
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    return {"stale": stale, "kept": kept, "total": total}

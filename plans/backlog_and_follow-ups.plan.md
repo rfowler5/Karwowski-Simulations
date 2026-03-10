@@ -7,7 +7,7 @@ overview: A reminder checklist for README improvements, code hardening, benchmar
 
 Reminder list (minimal detail; you will flesh out when doing each).
 
-**Context for CI bootstrap items (below):** Full issue analysis, verdicts, and step-by-step implementation instructions (Phases 1–4) are in Cursor agent transcript **5a2c26f6-2ac9-4dad-9d52-ce0efc39a5c9** — search or open that chat when ready to implement. Issue 1 (memory chunking for `boot_idx_all`) is already implemented.
+**Context for CI bootstrap items (below):** Full issue analysis, verdicts, and step-by-step implementation instructions (Phases 1–4) are in Cursor agent transcript Optimizations and Bugs CIs: **5a2c26f6-2ac9-4dad-9d52-ce0efc39a5c9** — search or open that chat when ready to implement. Issue 1 (memory chunking for `boot_idx_all`) is already implemented.
 
 ---
 
@@ -33,7 +33,7 @@ Reminder list (minimal detail; you will flesh out when doing each).
    - Depending on results, add the y-ties correction to the asymptotic path.
 
 7. ~~**Linear generator calibration (currently biased upward)**~~ *(implemented)*
-   - ~~Linear generator does not use calibration (only nonparametric/copula/empirical do). Consider adding calibration for linear; it is currently biased, seemingly upward. Details: linear model calibration chat (agent-transcripts 971ab5af-9437-404a-a1b1-47f465024665).~~
+   - ~~Linear generator does not use calibration (only nonparametric/copula/empirical do). Consider adding calibration for linear; it is currently biased, seemingly upward..~~
    - `calibrate_rho_linear` added with both single and multipoint modes, same machinery as copula/nonparametric/empirical. `use_calibration=True` parameter added to `estimate_power`, `min_detectable_rho`, `_power_one_scenario`, and `run_all_scenarios`; set `use_calibration=False` to run linear uncalibrated as a cheap comparison baseline.
    - **Acceptance test:** Run `test_calibration_accuracy.py` with `n_sims=1000`, `n_cal=2000`, all four generators (now the default). Previously only nonparametric/copula/empirical passed; linear with calibration should also pass. Update the IMPORTANT NOTE at the top of that file after verifying.
 
