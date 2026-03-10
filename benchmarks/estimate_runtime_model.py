@@ -4,7 +4,26 @@ from single-scenario runs at small params; optionally fit a grid-level model fro
 full-grid runs to capture cross-scenario heterogeneity.
 
 Use predicted tier runtimes instead of running long empirical full grids.
-Run from project root: python benchmarks/estimate_runtime_model.py --generator empirical [options]
+Run from project root:
+
+  python benchmarks/estimate_runtime_model.py --generators empirical [options]
+  python benchmarks/estimate_runtime_model.py --generators nonparametric --mode both
+  python benchmarks/estimate_runtime_model.py --generators empirical --grid-n-sims 50,75,100 --grid-parallel
+
+Examples:
+  - Single-scenario only (fast, no full grid): --generators empirical
+  - Full-grid fit for better tier estimates: add --grid-n-sims 50,75,100 (power)
+    and/or --grid-ci-params "10,20 15,30" (CI). Use at least 2 values per fit.
+  - Multi-core extrapolation from measured parallel run: add --grid-parallel
+    (runs full grid once with n_jobs=-1).
+  - Borrow grid slope from a faster generator: --borrow-g-from nonparametric
+    with --grid-n-sims and/or --grid-ci-params (fit grid on proxy, scale to target).
+
+Mode (--mode):
+  - power: Fit only the power runtime model T = C + k*n and predict power tier runtimes.
+  - ci: Fit only the CI runtime model T_ci = C_ci + k_ci*(n_reps*n_boot) and predict CI tier runtimes.
+  - both: Fit both models and report power and CI tier predictions (default). For the linear
+    generator, CI is not supported; both runs power only.
 
 Two prediction models:
   - Single-scenario extrapolation = 88 * (C + k*n_tier).  Assumes every scenario
@@ -97,11 +116,11 @@ def _parse_args():
     p = argparse.ArgumentParser(
         description="Fit T=C+k*n runtime model and predict tier runtimes (power + CI)."
     )
-    p.add_argument("--generator", required=True,
-                   choices=["nonparametric", "copula", "linear", "empirical"],
-                   help="Generator to fit")
+    p.add_argument("--generators", required=True,
+                   help="Generator to fit: comma-separated, e.g. empirical or nonparametric,copula (first is used)")
     p.add_argument("--mode", default="both", choices=["power", "ci", "both"],
-                   help="power, ci, or both (default: both; linear -> power only)")
+                   help="What to fit: power (T=C+k*n only), ci (T_ci=C_ci+k_ci*(n_reps*n_boot) only), "
+                        "or both (default). Linear generator has no CI; use power or both (both runs power only for linear).")
     p.add_argument("--n-sims", default=None,
                    help="Comma-separated n_sims for power fit (overrides per-generator default)")
     p.add_argument("--grid-n-sims", default=None,
@@ -138,9 +157,22 @@ def _linear_fit_r2(xs, ys):
     return k, C, r2
 
 
+def _resolve_generator(generators_arg):
+    """Return first valid generator from comma-separated --generators."""
+    valid = ("nonparametric", "copula", "linear", "empirical")
+    req = [x.strip().lower() for x in generators_arg.split(",")]
+    chosen = [g for g in req if g in valid]
+    if not chosen:
+        return None
+    return chosen[0]
+
+
 def main():
     args = _parse_args()
-    generator = args.generator.lower()
+    generator = _resolve_generator(args.generators)
+    if generator is None:
+        print("Error: --generators must be one or more of: nonparametric, copula, linear, empirical.")
+        sys.exit(1)
     mode = args.mode.lower()
     logical_cores, physical_cores = _machine_info()
 
@@ -163,7 +195,7 @@ def main():
             print(f"Error: --borrow-g-from must be a valid generator, got {args.borrow_g_from}")
             sys.exit(1)
         if proxy == generator:
-            print("Error: --borrow-g-from must differ from --generator.")
+            print("Error: --borrow-g-from must differ from --generators.")
             sys.exit(1)
         if proxy == "empirical":
             print("Warning: --borrow-g-from=empirical is slow; consider nonparametric or copula.")

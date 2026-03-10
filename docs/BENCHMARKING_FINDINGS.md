@@ -97,11 +97,55 @@ Per-scenario time at n_sims=50 is ~32ms — too small for joblib overhead to be 
 
 ---
 
+## Estimating True Joblib Overhead from the Power Crossover Data
+
+The power benchmark gives three (seq, par) pairs at different n_sims, which allows fitting a simple two-parameter model:
+
+```
+par_time = seq_time / n_eff + T_overhead
+```
+
+where `n_eff` is the effective worker count (accounting for hyperthreading inefficiency) and `T_overhead` is the fixed per-run joblib cost (spawn, pickle, scheduling).
+
+**Two-point fit using n_sims = 50 and n_sims = 500:**
+
+```
+13.56 = 2.80 / n_eff + T_o    ... (1)
+18.21 = 18.43 / n_eff + T_o   ... (2)
+
+Subtracting (1) from (2):
+4.65 = 15.63 / n_eff  →  n_eff ≈ 3.36
+
+T_o = 13.56 − 2.80 / 3.36 ≈ 12.7s
+```
+
+**Check against n_sims = 1000:**
+
+```
+predicted: 39.5 / 3.36 + 12.7 ≈ 24.5s
+actual:    ~27–29s  (mid ~28s, ~14% off)
+```
+
+The n_sims=1000 point overshoots the prediction by ~3.5s, likely due to larger result serialization at higher n_sims, so 12.7s is a lower bound for overhead at very large params.
+
+**Conclusions:**
+
+| Quantity | Estimate |
+|----------|----------|
+| Fixed joblib overhead per full-grid run | **~12–13s** |
+| Effective parallel workers (4 logical / 2 physical HT) | **~3.4×** (close to 4, HT helps for this workload) |
+
+The effective worker count of ~3.4 is notably close to 4, suggesting HT is more useful here than the usual CPU-bound ~1.3–1.5× ceiling. This may reflect memory-latency overlap in the Numba kernels. With n_eff ≈ 3.4, the theoretical maximum parallel speedup on this machine for the power workload is ~3.4×; the overhead of ~12.7s is what prevents achieving it in practice until seq_time is large enough.
+
+**Note:** The CI workload does not fit this model. CI parallel (97.66s) is only 1.22× faster than sequential (119.11s), whereas the power model would predict ~1.7× at these seq times. CI likely has higher per-run overhead due to larger data volumes being serialized (bootstrap rho matrices) and different Numba call structure per scenario.
+
+---
+
 ## Revised Understanding: What the Old "89% Joblib Overhead" Was
 
 The prior decomposition (Sequential 159s vs Parallel Numba=1 253s → 94s gap attributed to joblib) was measured with cold workers. Workers spent most of their time rebuilding calibration curves and null distributions for their assigned scenarios before doing any bootstrap work. That rebuild cost appeared as "joblib overhead" when comparing to hot-cache sequential. With injection, that 94s disappears and parallel genuinely wins.
 
-True joblib overhead (spawn, serialization, scheduling) is real but much smaller — likely a few seconds per run — and is amortized once per-scenario work is large enough.
+True joblib overhead (spawn, serialization, scheduling) is real but much smaller. Fitting a two-point model to the power crossover data (see section above) gives ~12–13s of fixed overhead per full-grid run, amortized across all 88 scenarios — roughly **0.14s per scenario** or **~3s per worker**. This is the overhead that must be paid regardless of n_sims; once per-scenario compute time is large relative to it, parallel wins.
 
 ---
 

@@ -34,7 +34,7 @@ We test H₀: ρ = 0 vs H₁: ρ ≠ 0 (two-sided) at α = 0.05. Power is the pr
 
 ## Assumptions
 
-- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR, or when using the empirical generator, via the **empirical distribution** (resampling from digitized Figure of Karwowski B-Al/H-Al data). Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. The log-normal is fitted using `q75 = median + IQR/2` (symmetric split of the reported IQR); for a truly log-normal distribution the split is asymmetric, so sigma is slightly underestimated. This has no effect on rank-based results since only the ordering of y matters. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so choosing a distribution of distinct values for generating y in our simulation is a good approximation. It should be noted though that those data points show B-Al follows a log-normal distribution, and so likely does also at N = 73, but the outliers likely shift it away from log-normal, and the H-Al data is not log-normal.
+- **Y marginal distribution (aluminum levels):** Y is modeled as log-normal using the reported median and IQR, or when using the empirical generator, via the **empirical distribution** (resampling from digitized Figure of Karwowski B-Al/H-Al data). Because Spearman's rank correlation depends *only* on ranks, the specific continuous distribution of Y has **no effect** on the correlation coefficient, its null distribution, power, or confidence intervals in the non-parametric, linear, or asymptotic methods. The log-normal choice is kept purely for realism (capturing skewness and outliers) and because the Gaussian copula method requires a continuous marginal. The log-normal is fitted using `q75 = median + IQR/2` (symmetric split of the reported IQR); for a truly log-normal distribution the split is asymmetric, so sigma is slightly underestimated. This has no effect on rank-based results since only the ordering of y matters. Based on the Karwowski (2018) Figure showing the B-Al vs H-Al correlation (N = 71, excluding missing values and outliers), these values have few and mild ties, so choosing a distribution of distinct values for generating y in our simulation is a good approximation. It should be noted though that those data points show B-Al follows a log-normal distribution, and so likely does also at N = 73, but the outliers likely shift it away from log-normal, and the H-Al data is not log-normal. *(Implementation note: in the default batch execution path, lognormal y values are **never actually generated** for the nonparametric, copula, or linear generators. The skip-y optimization returns rank arrays directly, bypassing lognormal/exp generation entirely — these generators consume no RNG draws for y marginals in production. Only the empirical generator generates actual y values. See [Skip-y for data generation](#skip-y-for-data-generation-power-simulation-and-ci-bootstrap).)*
 
 - **Tie structure distributions:** Three frequency distributions (`even`, `heavy_tail`, `heavy_center`) are tested for sensitivity; differences across them are small, which is reassuring given unavailable raw data. `heavy_center` is considered most plausible for real vaccination schedules: most children followed the schedule and would be clustered in the middle for ages 9–13 months, with the middle 50% under 12 months. More realistic skewed patterns have also been explored but are currently undocumented here (e.g., for k=4 distinct values: only 2–5 observations in the tails, heavy concentration in the second value, and substantial but lower counts in the third). Users can test custom frequencies with `scripts/run_single_scenario.py --freq`.
 
@@ -55,7 +55,7 @@ This is a bivariate simplification of the Iman-Conover method, applied directly 
 1. Computing the standardised midranks of x (handling ties naturally).
 2. Generating independent noise ranks via random permutation.
 3. Mixing the two at weight rho: `mixed = rho_cal * s_x + sqrt(1 - rho_cal^2) * s_noise`. This is essentially the Cholesky decomposition (Iman-Conover) in the bivariate case applied directly to ranks.
-4. Mapping the resulting ordering onto random draws from the target log-normal y-marginal.
+4. Mapping the resulting ordering onto random draws from the target log-normal y-marginal. *(In the default batch path, this step is skipped entirely: `_return_ranks=True` returns `rank(mixed)` directly without drawing any lognormal values. See [Skip-y for data generation](#skip-y-for-data-generation-power-simulation-and-ci-bootstrap).)*
 
 **Calibration**: Because ties attenuate the realised Spearman rho relative to the mixing weight, the method includes an automatic calibration step. Two modes are available (configurable via `config.CALIBRATION_MODE` or `--calibration-mode`). In both modes, calibration runs once per unique tie structure and is reused across all rho values during bisection — a major performance improvement over per-rho calibration:
 - **Multipoint (default)** (non-parametric rank-mixing only): Probes at rho = 0.10, 0.30, 0.50 and interpolates the calibration curve. Captures nonlinear attenuation (ratio varies with rho) and reduces bias to typically under 0.01. **Accuracy**: Better than single-point when attenuation is nonlinear (e.g. custom or extreme tie structures). **Performance**: ~3× slower calibration on first run per tie structure (~9s vs ~3s) because it probes three values instead of one; cached thereafter and reused for all rho targets.
@@ -163,7 +163,7 @@ Uses a Gaussian copula with non-parametric marginals and a fitted log-normal for
 z_y = \rho_p z_x + \sqrt{1-\rho_p^2} Z
 ```
 
-; $`u_y = \Phi(z_y)`$; (3) $`y = F_{\ln}^{-1}(u_y)`$ with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`.
+; $`u_y = \Phi(z_y)`$; (3) $`y = F_{\ln}^{-1}(u_y)`$ with log-normal fitted to median/IQR. See `data_generator.generate_y_copula`. *(In the default batch path, the $`\Phi`$ and log-normal quantile transforms are skipped: `_return_ranks=True` returns `rank(z_y)` directly.)*
 
 **With ties:** Jittering collapses rank information so realised Spearman is attenuated; single-point calibration at $`\rho_s = 0.30`$ (cached per scenario) compensates. Unlike the nonparametric method, the copula always uses single-point calibration (no multipoint option).
 
@@ -201,9 +201,68 @@ so the identity holds for all practical purposes. The fast path bypasses the cli
 | Copula: `rank(y) = rank(z_y)` | < 6.3 × 10⁻¹³ (clipping creates tie) |
 | Batch vs sequential RNG | N/A — same distribution, different numbers |
 
+#### Skip-y for data generation (power simulation and CI bootstrap)
+
+The skip-y identities above were originally developed for calibration. The same identities extend to the actual data generation step: in the default batch execution path, all three non-empirical generators are called with `_return_ranks=True` in both `estimate_power` (power simulation) and `bootstrap_ci_averaged` with batch bootstrap (CI). The empirical generator is unchanged.
+
+**Why every downstream consumer is correct.** All uses of `y_all` in both paths depend only on the *ranks* of y, not on the scale of y values. The key property is that `rank(y)` is an **order-isomorphism**: for any two positions $`i, j`$,
+
+```math
+y[i] < y[j] \iff \mathrm{rank}(y)[i] < \mathrm{rank}(y)[j]
+```
+
+and all values in the rank array are distinct (continuous y ⇒ no ties). This makes the rank array interchangeable with the float array for any function that operates via ranks.
+
+- **`spearman_rho_2d(x_all, y_all)`** and **`spearman_rho_pvalue_2d(...)`** — both call `_rank_rows(y)` internally. Ranking a tie-free rank array is idempotent: `rank({1,2,...,n} permuted) = {1,2,...,n} permuted` (each value already equals its own rank). Identical rho values.
+- **`pvalues_from_precomputed_null(rhos_obs, ...)`** — depends only on `rhos_obs`, not directly on `y_all`.
+- **Permutation p-values (`pvalues_mc`)** — see below.
+- **Batch bootstrap (`_batch_bootstrap_rhos_jit`)** — see below.
+
+##### Permutation path
+
+Each permutation $`\sigma`$ in `pvalues_mc` is a **bijection** — `perm_idx[b, rep, :]` is generated by `np.argsort(rng.random(...))`, which always produces a permutation of $`\{0, \ldots, n-1\}`$ with no repeats. So the permuted-y row contains all $`n`$ distinct values (from float y) or all $`n`$ distinct ranks.
+
+**Claim.** For any bijection $`\sigma`$: `_tied_rank(y_float[σ]) = _tied_rank(y_ranks[σ])`.
+
+**Proof.** Let $`r = \mathrm{rank}(y)`$. Since $`\sigma`$ is a bijection, neither `y_float[σ]` nor `y_ranks[σ]` contains any duplicates. For any two positions $`i, j`$:
+
+```math
+y_{\mathrm{float}}[\sigma(i)] < y_{\mathrm{float}}[\sigma(j)] \iff r[\sigma(i)] < r[\sigma(j)] \iff y_{\mathrm{ranks}}[\sigma(i)] < y_{\mathrm{ranks}}[\sigma(j)]
+```
+
+Identical strict ordering, no ties in either array → `_tied_rank` produces the same output. $`\square`$
+
+##### Bootstrap subtlety
+
+The bootstrap step in `_batch_bootstrap_rhos_jit` draws **with replacement**, so a bootstrap resample $`B = (b_1, \ldots, b_n)`$ may contain duplicate indices. This means a bootstrap row can contain *repeated values* — creating ties that did not exist in the original y. The key is that the tie structure is identical for float and rank representations.
+
+**Claim.** For any bootstrap resample $`B`$ (with or without repeated indices): `_tied_rank(y_float[B]) = _tied_rank(y_ranks[B])`.
+
+**Proof.** Let $`r = \mathrm{rank}(y)`$.
+
+*Tie structure.* Two positions $`i, j`$ in the resample are tied if and only if $`b_i = b_j`$:
+- Float: $`y[b_i] = y[b_j] \iff b_i = b_j`$ (y has no original ties, so equal values imply same source index).
+- Ranks: $`r[b_i] = r[b_j] \iff b_i = b_j`$ (r is a permutation of distinct integers).
+
+Both arrays have **identical tie patterns**: a tie occurs precisely when the same original index is drawn more than once.
+
+*Ordering of non-tied positions.* For $`b_i \neq b_j`$:
+
+```math
+y[b_i] < y[b_j] \iff r[b_i] < r[b_j]
+```
+
+since rank is strictly order-preserving. Therefore both resampled arrays have the same strict ordering *and* the same tie structure, so `_tied_rank` (which uses average-rank tie-breaking) assigns identical values. $`\square`$
+
+**Intuition.** A bootstrap resample is a multiset of y values. Whether we represent each element as its float value or as its rank, the *relative order* and *equality pattern* within the multiset are preserved. `_tied_rank` depends only on these, so it cannot distinguish the two representations.
+
+**RNG note (nonparametric only).** With `_return_ranks=True`, the nonparametric generator skips `rng.lognormal(...)`, consuming $`n_{\mathrm{sims}} \times n`$ fewer values from the shared RNG in `estimate_power`. In the CI path this is harmless because data and bootstrap use separate RNG streams (`SeedSequence.spawn(2)`). In the power simulation path, the p-value step (permutation indices or null binary search) draws from a different RNG state than the float-y path would — but any valid random permutations give an unbiased permutation test. Results are statistically equivalent, not bit-identical, for the nonparametric generator. Copula and linear have no RNG divergence (the skipped operations are deterministic transforms).
+
+**Regression tests.** `tests/test_skip_y_ranks.py` Steps 1–6 verify: rank identity (`rank(y_float) = y_ranks`), Spearman rho identity, batch bootstrap rho matrix identity (bit-exact), rho=0 edge case, all-distinct x, and permutation MC p-value identity (`pvalues_mc` bit-exact for float vs rank y). The last test directly covers the permutation subtlety above.
+
 ### Linear Monte Carlo
 
-**Model:** $`\log(y) = \mu_{\ln} + b \cdot x_{\mathrm{std}} + \sigma_{\mathrm{noise}} \cdot Z`$, with $`x_{\mathrm{std}} = (x - \mathrm{mean}(x))/\mathrm{std}(x)`$, and $`(\mu_{\ln}, \sigma_{\ln})`$ from fitting log-normal to median/IQR. See `data_generator.generate_y_linear`.
+**Model:** $`\log(y) = \mu_{\ln} + b \cdot x_{\mathrm{std}} + \sigma_{\mathrm{noise}} \cdot Z`$, with $`x_{\mathrm{std}} = (x - \mathrm{mean}(x))/\mathrm{std}(x)`$, and $`(\mu_{\ln}, \sigma_{\ln})`$ from fitting log-normal to median/IQR. See `data_generator.generate_y_linear`. *(In the default batch path, `exp()` is never applied: `_return_ranks=True` returns `rank(log_y)` directly.)*
 
 **Target:** $`\rho_p = 2\sin(\pi \rho_s/6)`$; set $`b = \rho_p \cdot \sigma_{\ln}`$ and noise variance $`\sigma_{\ln}^2(1-\rho_p^2)`$ so that theoretical Pearson($`x_{\mathrm{std}}`$, log y) = $`\rho_p`$.
 
@@ -651,20 +710,21 @@ python scripts/run_single_scenario.py --case 3 --n-distinct 4 --dist-type heavy_
 
 ## Performance and Runtime Estimates
 
-### Optimisation summary
+### Optimization summary
 
-**Vectorization and parallelization:** The original implementation used a scalar loop over bootstrap replicates and power simulations. Several optimisations combine to speed things up:
+**Vectorization and parallelization:** The original implementation used a scalar loop over bootstrap replicates and power simulations. Several optimizations combine to speed things up:
 
 - **Vectorized Spearman** — argsort-based ranking, O(n log n) per row, replaces per-row scipy calls.
 - **Vectorized data generation** — `config.VECTORIZE_DATA_GENERATION` (default True): power and CI generate all n_sims or n_reps datasets in one batch via `generate_*_batch` functions instead of looping per dataset.
 - **Batch bootstrap** — `config.BATCH_CI_BOOTSTRAP` (default True): CI generates all n_reps datasets and n_boot resamples in one batch, then computes Spearman across all bootstrap samples in a single Numba call. Requires `VECTORIZE_DATA_GENERATION=True`. Gives ~2.5× sequential speedup over per-rep bootstrap; see [Benchmark data](#benchmark-data-ci-bootstrap) below.
+- **Skip-y data generation** — In the default batch path, non-empirical generators (`generate_y_nonparametric_batch`, `generate_y_copula_batch`, `generate_y_linear_batch`) return rank arrays directly (`_return_ranks=True`) instead of generating float y, skipping lognormal/exp generation entirely. Saves ~15–20% of the data-generation step for both power simulation and CI batch bootstrap. The empirical generator is unchanged. See [Skip-y for data generation](#skip-y-for-data-generation-power-simulation-and-ci-bootstrap).
 - **Scenario-level parallelization** — **joblib** (`--n-jobs`) farms scenarios out across cores. **Caveat:** With **batch bootstrap**, parallel (`n_jobs=-1`) is often *slower* than sequential (`n_jobs=1`) due to joblib overhead and nested parallelism with Numba; see [Parallelization and Numba caveats](#parallelization-and-numba-caveats) below.
 
 These flags live in `config.py`: `VECTORIZE_DATA_GENERATION`, `BATCH_CI_BOOTSTRAP`, `CALIBRATION_MODE` (multipoint vs single), and `USE_PERMUTATION_PVALUE` (permutation vs t-based p-value for power).
 
 **Calibration:** Uses a rho-independent attenuation ratio cached per (n, k, dist_type). The calibration cost is paid **once per tie structure**, not once per rho value tested during bisection — eliminating the dominant bottleneck of the original implementation (~60× speedup for power estimation).
 
-**Other optimisations:** `_fit_lognormal` results are LRU-cached; x-value templates are cached and only shuffled per call. Power simulation uses permutation-based p-values (precomputed null or batched Monte Carlo) when `USE_PERMUTATION_PVALUE=True`; see [P-value method (power simulation)](#p-value-method-power-simulation).
+**Other optimizations:** `_fit_lognormal` results are LRU-cached; x-value templates are cached and only shuffled per call. Power simulation uses permutation-based p-values (precomputed null or batched Monte Carlo) when `USE_PERMUTATION_PVALUE=True`; see [P-value method (power simulation)](#p-value-method-power-simulation).
 
 ### Memory (Monte Carlo p-value batching)
 
@@ -964,7 +1024,7 @@ Copula and linear generators have similar per-sim cost but no calibration overhe
 
 ## Benchmark scripts
 
-Six scripts measure performance of the main optimisations (vectorized data generation, batch CI bootstrap) and precision/runtime planning. Run scripts one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
+Six scripts measure performance of the main optimizations (vectorized data generation, batch CI bootstrap) and precision/runtime planning. Run scripts one at a time (concurrent runs cause CPU contention and invalidate timings; see Tips above).
 
 | Script | Purpose |
 |--------|---------|

@@ -314,3 +314,58 @@ def warm_precomputed_null_cache(cases=None, n_distinct_values=None,
 def get_null_cache_snapshot():
     """Return a shallow copy of _NULL_CACHE for passing to joblib workers."""
     return dict(_NULL_CACHE)
+
+
+def save_null_cache_to_disk(path, n_pre):
+    """Persist the null cache to a pickle file.
+
+    The file includes metadata (n_pre, config hash) so that
+    load_null_cache_from_disk() can detect stale files.
+    Creates the parent directory if it does not exist.
+    """
+    import os
+    import pickle
+    from data_generator import compute_config_hash
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    payload = {
+        "metadata": {"n_pre": n_pre, "config_hash": compute_config_hash()},
+        "cache": get_null_cache_snapshot(),
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_null_cache_from_disk(path, n_pre) -> bool:
+    """Load the null cache from a pickle file into the module-level _NULL_CACHE.
+
+    Returns True on success.  Returns False (with a UserWarning) if the file
+    is missing or its metadata does not match the current n_pre / config grid.
+    """
+    import pickle
+    import warnings
+    from data_generator import compute_config_hash
+    try:
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+    except FileNotFoundError:
+        return False
+    meta = payload["metadata"]
+    current_hash = compute_config_hash()
+    if meta["n_pre"] != n_pre:
+        warnings.warn(
+            f"Disk null cache has n_pre={meta['n_pre']} but "
+            f"current n_pre={n_pre} — ignoring disk cache, recomputing in-process.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+    if meta["config_hash"] != current_hash:
+        warnings.warn(
+            "Disk null cache config hash mismatch (CASES/FREQ_DICT/grid changed) "
+            "— ignoring disk cache, recomputing in-process.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+    _NULL_CACHE.update(payload["cache"])
+    return True

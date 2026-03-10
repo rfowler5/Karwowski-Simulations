@@ -452,3 +452,150 @@ Any error that is fundamentally a mismatch between what you wanted and what
 was built is your responsibility to catch at spec-writing time, not the AI's
 responsibility to catch during implementation. The spec checkpoint is the
 mechanism for doing that.
+
+---
+
+# Part 3 — Disk Cache Workflow
+
+## When to use the precompute script
+
+Building calibration and null caches in-process takes time that scales with
+`n_cal` and `n_pre`.  At the precision tiers that matter most (±0.001,
+`n_cal ≈ 96 400`, `n_pre ≈ 500 000`), sequential cache build can dominate
+total runtime.  Precomputing once and loading from disk on subsequent runs
+eliminates this cost.
+
+**Scenarios where precomputing pays off:**
+- Copula or empirical generator (calibration is slower than nonparametric).
+- ±0.001 precision tier: `n_cal = 96 400`, `n_pre = 500 000`.
+- Repeated runs (CI and power both need the same calibration cache).
+
+---
+
+## Precomputing caches
+
+Run from the project root. The script warms up Numba at the start (one small
+run), so no separate warm-up script is needed:
+
+```
+python scripts/precompute_caches.py --generators nonparametric --n-cal 96400 \
+    --null --n-pre 500000 --n-jobs 4 --output-dir cache/
+```
+
+To precompute for multiple generators in one run (e.g. nonparametric and copula):
+
+```
+python scripts/precompute_caches.py --generators nonparametric,copula --n-cal 96400 \
+    --null --n-pre 500000 --n-jobs 4 --output-dir cache/
+```
+
+This writes:
+- `cache/calibration_ncal96400.pkl`
+- `cache/null_npre500000.pkl`
+
+**Memory note:** at `n_cal = 500 000`, each worker holds ~640 MB–1 GB of
+arrays.  With 4 workers: 2.5–4 GB RAM required.  Lower `--n-jobs` if RAM
+is limited.
+
+**Numba note:** workers spawn fresh processes on Windows; Numba re-loads its
+JIT cache from disk (~1–2 s per worker once compiled).  Running
+`warm_up_numba.py` first ensures the cache is populated.
+
+The script prints wall-clock timing and file sizes after each phase.
+
+---
+
+## Using disk caches in a run
+
+Pass `disk_cache_dir` to `run_all_scenarios()` or `run_all_ci_scenarios()`:
+
+```python
+from power_simulation import run_all_scenarios
+
+results = run_all_scenarios(
+    generator="nonparametric",
+    n_cal=96400,
+    n_sims=222050,
+    n_jobs=4,
+    disk_cache_dir="cache/",   # loads calibration_ncal96400.pkl + null_npre*.pkl
+)
+```
+
+The simulation loads both caches before the `pre_warm` step.  If the load
+succeeds, `pre_warm` is instant (88 dict lookups, microseconds).
+
+---
+
+## In-process pre-warm: default behavior without disk caches
+
+**Without `disk_cache_dir`**, nothing about the pre-warm behavior changes.
+Both `run_all_scenarios()` and `run_all_ci_scenarios()` still pre-warm
+calibration (and null) caches in the main process before running scenarios,
+exactly as they did before the disk-cache feature was added.  This applies
+to both sequential (`n_jobs=1`) and parallel (`n_jobs > 1`) runs:
+
+- **Sequential:** pre_warm builds all cache entries upfront; subsequent
+  scenario calls are instant dict lookups.
+- **Parallel:** pre_warm builds all entries in the main process, snapshots
+  them, and injects the snapshots into workers via an initializer.  Workers
+  receive complete caches and skip all build cost.
+
+Setting `disk_cache_dir` adds an optional *fast path*: the disk load runs
+first, populating the module-level dicts, and then the pre_warm calls become
+no-ops (cache already full).  On a miss or mismatch, pre_warm runs normally
+and builds everything in-process.
+
+**The only way to skip pre-warm entirely is `pre_warm=False`**, which was
+the intended opt-out before the disk-cache feature and remains so.  Use it
+only when you have pre-warmed caches manually and want to skip even the 88
+dict-lookup cost.  With `pre_warm=False` and no successful disk load,
+sequential runs build cache entries on demand and parallel workers start
+cold (each rebuilds its own entries, results are lost when the worker exits).
+
+---
+
+## Read-only by default; opt-in to save
+
+The simulation **never writes** cache files unless you explicitly ask it to.
+The default from `config.SAVE_CACHE_TO_DISK` is `False`.
+
+To persist caches built in-process (e.g. no file existed, or load failed):
+
+```python
+# Option A — one-off via parameter
+results = run_all_scenarios(
+    ...,
+    disk_cache_dir="cache/",
+    save_cache_to_disk=True,
+)
+
+# Option B — set in config.py for all future runs
+SAVE_CACHE_TO_DISK = True
+```
+
+With `save_cache_to_disk=True` and `disk_cache_dir` set, after the run
+completes the calibration (and null, for power runs) caches are written to
+the named files.
+
+---
+
+## Warning behavior
+
+When a disk cache file exists but its metadata does not match the current
+configuration, a `UserWarning` fires and the cache is ignored:
+
+- **n_cal mismatch** — file was built with a different `n_cal`.
+- **config hash mismatch** — `CASES`, `FREQ_DICT`, `N_DISTINCT_VALUES`, or
+  `DISTRIBUTION_TYPES` changed since the file was built.
+
+In both cases the simulation falls through to normal in-process cache
+building.  Re-run `precompute_caches.py` with the correct parameters to
+refresh the file.
+
+---
+
+## Precision targets and n_cal / n_pre reference
+
+See `docs/UNCERTAINTY_BUDGET.md` Part 6 for the full analysis linking
+precision tier half-widths to the required `n_cal` and `n_pre` values and
+expected cache build times.

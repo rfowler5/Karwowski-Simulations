@@ -1496,6 +1496,79 @@ def get_calibration_cache_snapshots():
     }
 
 
+def compute_config_hash() -> str:
+    """SHA-256 of canonical config grid parameters (stable across Python runs)."""
+    import hashlib
+    import json
+    from config import CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES
+    obj = {
+        "CASES": CASES,
+        "N_DISTINCT_VALUES": N_DISTINCT_VALUES,
+        "DISTRIBUTION_TYPES": DISTRIBUTION_TYPES,
+        "FREQ_DICT": FREQ_DICT,
+    }
+    return hashlib.sha256(json.dumps(obj, sort_keys=True).encode()).hexdigest()
+
+
+def save_calibration_caches_to_disk(path, n_cal):
+    """Persist all 6 calibration caches to a pickle file.
+
+    The file includes metadata (n_cal, config hash) so that
+    load_calibration_caches_from_disk() can detect stale files.
+    Creates the parent directory if it does not exist.
+    """
+    import os
+    import pickle
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    payload = {
+        "metadata": {"n_cal": n_cal, "config_hash": compute_config_hash()},
+        "caches": get_calibration_cache_snapshots(),
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_calibration_caches_from_disk(path, n_cal) -> bool:
+    """Load calibration caches from a pickle file into the module-level dicts.
+
+    Returns True on success.  Returns False (with a UserWarning) if the file
+    is missing or its metadata does not match the current n_cal / config grid.
+    """
+    import pickle
+    import warnings
+    try:
+        with open(path, "rb") as f:
+            payload = pickle.load(f)
+    except FileNotFoundError:
+        return False
+    meta = payload["metadata"]
+    current_hash = compute_config_hash()
+    if meta["n_cal"] != n_cal:
+        warnings.warn(
+            f"Disk calibration cache has n_cal={meta['n_cal']} but "
+            f"current n_cal={n_cal} — ignoring disk cache, recomputing in-process.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+    if meta["config_hash"] != current_hash:
+        warnings.warn(
+            "Disk calibration cache config hash mismatch (CASES/FREQ_DICT/grid changed) "
+            "— ignoring disk cache, recomputing in-process.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return False
+    snaps = payload["caches"]
+    _CALIBRATION_CACHE_MULTIPOINT.update(snaps["mp"])
+    _CALIBRATION_CACHE_MULTIPOINT_COPULA.update(snaps["mp_cop"])
+    _CALIBRATION_CACHE_MULTIPOINT_EMP.update(snaps["mp_emp"])
+    _CALIBRATION_CACHE.update(snaps["sp"])
+    _CALIBRATION_CACHE_COPULA.update(snaps["sp_cop"])
+    _CALIBRATION_CACHE_EMP.update(snaps["sp_emp"])
+    return True
+
+
 def generate_y_nonparametric(x, rho_s, y_params, rng=None,
                              _calibrated_rho=None, _ln_params=None):
     """Generate y via calibrated rank-mixing to target Spearman *rho_s*.
@@ -1548,7 +1621,8 @@ def generate_cumulative_aluminum_batch(n_sims, n, n_distinct,
 
 
 def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
-                        _ln_params=None, marginal="lognormal", pool=None):
+                        _ln_params=None, marginal="lognormal", pool=None,
+                        _return_ranks=False):
     n_sims, n = x_ranks_batch.shape
 
     # Noise ranks: independent permutation per row (permuted in NumPy 1.20+; argsort fallback)
@@ -1581,6 +1655,16 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
     rho_c = np.clip(rho_input, -0.999, 0.999)
     mixed = rho_c * s_x + np.sqrt(1.0 - rho_c ** 2) * s_n   # (n_sims, n)
 
+    # Skip-y optimisation (CI bootstrap + power simulation): mixed is
+    # continuous (jitter ensures no ties), so rank(y_final) == rank(mixed).
+    # Returning ranks avoids the lognormal draw, sort, and scatter-assign
+    # (~15-20% of data-gen time).
+    # Not valid for empirical marginal (pool has real ties from digitized data).
+    if _return_ranks:
+        if marginal == "empirical":
+            raise ValueError("_return_ranks=True invalid for empirical marginal")
+        return _rank_rows(mixed)
+
     if marginal == "lognormal":
         if _ln_params is not None:
             mu, sigma = _ln_params
@@ -1609,16 +1693,17 @@ def _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
 
 
 def generate_y_nonparametric_batch(x_batch, rho_s, y_params, rng=None,
-                                    _calibrated_rho=None, _ln_params=None):
+                                    _calibrated_rho=None, _ln_params=None,
+                                    _return_ranks=False):
     if rng is None:
         rng = np.random.default_rng()
     rho_input = _calibrated_rho if _calibrated_rho is not None else rho_s
     x_ranks_batch = _rank_rows(x_batch)     # from spearman_helpers — Numba-accelerated
     return _raw_rank_mix_batch(x_ranks_batch, rho_input, y_params, rng,
-                               _ln_params=_ln_params)
+                               _ln_params=_ln_params, _return_ranks=_return_ranks)
 
 
-def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None):
+def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None, _return_ranks=False):
     if rng is None:
         rng = np.random.default_rng()
     n_sims, n = x_batch.shape
@@ -1630,6 +1715,13 @@ def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None):
     z_x = norm.ppf(u_x)
 
     z_y = rho_p * z_x + np.sqrt(max(1.0 - rho_p ** 2, 0.0)) * rng.standard_normal((n_sims, n))
+
+    # Skip-y (CI bootstrap + power simulation): norm.cdf and
+    # _lognormal_quantile are both monotone, so rank(y) == rank(z_y).
+    # Returning ranks avoids those transforms and the _fit_lognormal call.
+    if _return_ranks:
+        return _rank_rows(z_y)
+
     u_y = norm.cdf(z_y)
 
     mu_ln, sigma_ln = _fit_lognormal(y_params["median"], y_params["iqr"])
@@ -1637,14 +1729,15 @@ def generate_y_copula_batch(x_batch, rho_s, y_params, rng=None):
     return y
 
 
-def generate_y_linear_batch(x_batch, rho_s, y_params, rng=None):
+def generate_y_linear_batch(x_batch, rho_s, y_params, rng=None, _return_ranks=False):
     if rng is None:
         rng = np.random.default_rng()
     n_sims, n = x_batch.shape
     mu_ln, sigma_ln = _fit_lognormal(y_params["median"], y_params["iqr"])
 
     if abs(rho_s) < 1e-12:
-        return np.exp(mu_ln + sigma_ln * rng.standard_normal((n_sims, n)))
+        log_y = mu_ln + sigma_ln * rng.standard_normal((n_sims, n))
+        return _rank_rows(log_y) if _return_ranks else np.exp(log_y)
 
     x_std = x_batch - x_batch.mean(axis=1, keepdims=True)
     sx = x_std.std(axis=1, keepdims=True, ddof=0)
@@ -1661,6 +1754,16 @@ def generate_y_linear_batch(x_batch, rho_s, y_params, rng=None):
     noise_sd = np.sqrt(max(noise_var, 1e-12))
 
     log_y = mu_ln + b * x_std + noise_sd * rng.standard_normal((n_sims, n))
+
+    if _return_ranks:
+        # Skip-y (CI bootstrap + power simulation): exp is monotone, so
+        # rank(y) == rank(log_y).  Patch degenerate rows in log-space then
+        # return ranks; skips exp entirely.
+        if not np.all(ok):
+            bad = ~ok.ravel()
+            log_y[bad] = mu_ln + sigma_ln * rng.standard_normal((bad.sum(), n))
+        return _rank_rows(log_y)
+
     y = np.exp(log_y)
     # Where sx was degenerate, replace with pure noise
     if not np.all(ok):

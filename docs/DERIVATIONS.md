@@ -22,7 +22,7 @@ where
 - `s_n` = standardized noise ranks (a random permutation of `{1,...,n}`, standardized by population constants)
 - `rho_in` ∈ (−1, 1) is the input correlation
 
-Because y is lognormal (no ties), `rank(y_final) = rank(mixed)` (the "skip-y identity"), so calibration depends only on `(n, template, seed, n_cal)`.
+Because y comes from a continuous distribution (here lognormal — no ties), `rank(y_final) = rank(mixed)` (the "skip-y identity"), so calibration depends only on `(n, template, seed, n_cal)`. The identity holds for any continuous marginal; the lognormal is the specific model used in this codebase.
 
 For the **k = 4, even** case with n = 80:
 

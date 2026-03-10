@@ -261,6 +261,13 @@ USE_NUMBA = True
 VECTORIZE_DATA_GENERATION = True
 BATCH_CI_BOOTSTRAP = True
 
+# When True (and disk_cache_dir is passed to run_all_scenarios /
+# run_all_ci_scenarios), any cache built in-process during a run is persisted
+# to disk for reuse on subsequent runs.  Default False keeps behaviour
+# read-only — the simulation only reads from disk, never writes.
+# Callers may also pass save_cache_to_disk=True directly to override.
+SAVE_CACHE_TO_DISK = False
+
 # ---------------------------------------------------------------------------
 # Permutation p-value settings
 # ---------------------------------------------------------------------------

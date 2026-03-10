@@ -56,7 +56,7 @@ from joblib import Parallel, delayed
 from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     N_BOOTSTRAP, ALPHA, ASYMPTOTIC_TIE_CORRECTION_MODE,
                     CALIBRATION_MODE, VECTORIZE_DATA_GENERATION,
-                    BATCH_CI_BOOTSTRAP, N_CAL)
+                    BATCH_CI_BOOTSTRAP, N_CAL, SAVE_CACHE_TO_DISK)
 from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             digitized_available, generate_y_empirical,
                             generate_y_empirical_batch, generate_y_linear,
@@ -69,7 +69,9 @@ from data_generator import (generate_cumulative_aluminum, generate_y_copula,
                             generate_y_copula_batch,
                             generate_y_linear_batch,
                             warm_calibration_cache,
-                            get_calibration_cache_snapshots)
+                            get_calibration_cache_snapshots,
+                            save_calibration_caches_to_disk,
+                            load_calibration_caches_from_disk)
 from power_asymptotic import asymptotic_ci, get_x_counts
 from spearman_helpers import (spearman_rho_2d, _fast_spearman_rho,
                               _bootstrap_rhos_jit, _batch_bootstrap_rhos_jit,
@@ -334,16 +336,19 @@ def bootstrap_ci_averaged(n, n_distinct, distribution_type, rho_s, y_params,
         if generator == "nonparametric":
             y_all = generate_y_nonparametric_batch(
                 x_all, rho_s, y_params, rng=data_rng,
-                _calibrated_rho=cal_rho, _ln_params=ln_params)
+                _calibrated_rho=cal_rho, _ln_params=ln_params,
+                _return_ranks=True)
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
-            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=data_rng)
+            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=data_rng,
+                                            _return_ranks=True)
         elif generator == "empirical":
             y_all = generate_y_empirical_batch(
                 x_all, rho_s, y_params, rng=data_rng,
                 _calibrated_rho=cal_rho)
         else:
-            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng)
+            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=data_rng,
+                                            _return_ranks=True)
 
         # Step 2: Compute rho_hats in one vectorized call
         rho_hats = spearman_rho_2d(x_all, y_all)  # (n_reps,)
@@ -487,7 +492,8 @@ def _ci_one_scenario(case_id, case, k, dt, all_distinct, generator,
 def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                          alpha=None, tie_correction_mode=None, seed=None,
                          n_jobs=1, calibration_mode=None, batch_bootstrap=None,
-                         n_cal=None, pre_warm=True):
+                         n_cal=None, pre_warm=True, disk_cache_dir=None,
+                         save_cache_to_disk=None):
     """Compute averaged bootstrap and asymptotic CIs for observed rhos.
 
     Uses bootstrap_ci_averaged (n_reps independent datasets, each
@@ -503,16 +509,31 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
         values) but not CI width.  Use the n_cal values from config.CI_TIERS
         for accuracy guarantees; see docs/UNCERTAINTY_BUDGET.md Part 2.
     pre_warm : bool
-        When True (default) and n_jobs != 1, warm the calibration cache in
-        the main process before snapshotting it into workers.  Re-warming an
+        When True (default), warm the calibration cache in the main process
+        before running scenarios.  For parallel runs this populates the
+        snapshot sent to workers; for sequential runs it ensures all cache
+        entries are built upfront (and enables disk save).  Re-warming an
         already-warm cache costs only dict lookups (~88 checks, microseconds).
         Set False only if you have pre-warmed manually and want to skip even
         that overhead.
+    disk_cache_dir : str or Path or None
+        Directory containing pre-built cache files produced by
+        ``scripts/precompute_caches.py``.  When set, the calibration cache
+        is loaded from disk before the pre_warm step, making pre_warm
+        effectively instant on a hit.  On a miss or metadata mismatch a
+        UserWarning is issued and the cache is built in-process as usual.
+        Ignored when None (default).
+    save_cache_to_disk : bool or None
+        When True (and disk_cache_dir is set), the calibration cache built
+        in-process during this run is persisted to disk.  When None (default),
+        the effective value comes from config.SAVE_CACHE_TO_DISK.
 
     Returns
     -------
     list of dict
     """
+    from pathlib import Path
+
     if n_boot is None:
         n_boot = N_BOOTSTRAP
     if alpha is None:
@@ -542,13 +563,29 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
                           calibration_mode, batch_bootstrap, n_cal))
         scenario_idx += 1
 
-    if n_jobs == 1:
-        return [_ci_one_scenario(*args) for args in scenarios]
+    # Disk cache load (before pre_warm so pre_warm is instant on a hit).
+    _cal_loaded = False
+    _cal_path = None
+    if disk_cache_dir is not None:
+        _cal_path = Path(disk_cache_dir) / f"calibration_ncal{n_cal}.pkl"
+        _cal_loaded = load_calibration_caches_from_disk(_cal_path, n_cal)
 
     # Parallel path: warm calibration cache in main process then inject into
     # each worker.  CI workers never use the permutation null cache, so only
     # calibration snapshots are passed.
     _eff_cal_mode = calibration_mode if calibration_mode is not None else CALIBRATION_MODE
+
+    if n_jobs == 1:
+        if pre_warm:
+            warm_calibration_cache(generator,
+                                   calibration_mode=_eff_cal_mode,
+                                   n_cal=n_cal)
+        results = [_ci_one_scenario(*args) for args in scenarios]
+        _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
+        if disk_cache_dir is not None and _save and pre_warm and not _cal_loaded:
+            save_calibration_caches_to_disk(_cal_path, n_cal)
+        return results
+
     if pre_warm:
         warm_calibration_cache(generator,
                                calibration_mode=_eff_cal_mode,
@@ -556,11 +593,17 @@ def run_all_ci_scenarios(generator="nonparametric", n_reps=200, n_boot=None,
 
     cal_snaps = get_calibration_cache_snapshots()
 
-    return Parallel(
+    results = Parallel(
         n_jobs=n_jobs,
         initializer=_init_ci_worker_caches,
         initargs=(cal_snaps,),
     )(delayed(_ci_one_scenario)(*args) for args in scenarios)
+
+    _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
+    if disk_cache_dir is not None and _save and pre_warm and not _cal_loaded:
+        save_calibration_caches_to_disk(_cal_path, n_cal)
+
+    return results
 
 
 def _asymptotic_ci_results(rho_obs, n, alpha, x_counts, tie_correction_mode):

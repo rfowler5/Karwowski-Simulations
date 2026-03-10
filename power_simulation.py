@@ -36,7 +36,8 @@ from config import (CASES, N_DISTINCT_VALUES, DISTRIBUTION_TYPES,
                     VECTORIZE_DATA_GENERATION,
                     USE_PERMUTATION_PVALUE, N_PERM_DEFAULT, N_PERM_LOW_SIMS,
                     N_SIMS_THRESHOLD_FOR_N_PERM, PVALUE_PRECOMPUTED_N_PRE,
-                    PVALUE_MC_ON_CACHE_MISS, EMPIRICAL_USE_PRECOMPUTED_NULL)
+                    PVALUE_MC_ON_CACHE_MISS, EMPIRICAL_USE_PRECOMPUTED_NULL,
+                    SAVE_CACHE_TO_DISK)
 from power_asymptotic import get_x_counts
 from data_generator import (generate_cumulative_aluminum, get_generator,
                             calibrate_rho, calibrate_rho_copula,
@@ -49,14 +50,18 @@ from data_generator import (generate_cumulative_aluminum, get_generator,
                             generate_y_copula_batch,
                             generate_y_linear_batch,
                             warm_calibration_cache,
-                            get_calibration_cache_snapshots)
+                            get_calibration_cache_snapshots,
+                            save_calibration_caches_to_disk,
+                            load_calibration_caches_from_disk)
 from spearman_helpers import spearman_rho_pvalue_2d, spearman_rho_2d
 if USE_PERMUTATION_PVALUE:
     from permutation_pvalue import (get_precomputed_null, get_cached_null,
                                     pvalues_from_precomputed_null,
                                     pvalues_mc, _get_n_perm,
                                     warm_precomputed_null_cache,
-                                    get_null_cache_snapshot)
+                                    get_null_cache_snapshot,
+                                    save_null_cache_to_disk,
+                                    load_null_cache_from_disk)
 
 
 def _init_worker_caches(null_snap, cal_snaps):
@@ -154,16 +159,19 @@ def estimate_power(n, n_distinct, distribution_type, rho_s, y_params,
         if generator == "nonparametric":
             y_all = generate_y_nonparametric_batch(
                 x_all, rho_s, y_params, rng=rng,
-                _calibrated_rho=cal_rho, _ln_params=ln_params)
+                _calibrated_rho=cal_rho, _ln_params=ln_params,
+                _return_ranks=True)
         elif generator == "copula":
             rho_in = cal_rho if cal_rho is not None else rho_s
-            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=rng)
+            y_all = generate_y_copula_batch(x_all, rho_in, y_params, rng=rng,
+                                            _return_ranks=True)
         elif generator == "empirical":
             y_all = generate_y_empirical_batch(
                 x_all, rho_s, y_params, rng=rng,
                 _calibrated_rho=cal_rho)
         else:
-            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=rng)
+            y_all = generate_y_linear_batch(x_all, rho_s, y_params, rng=rng,
+                                            _return_ranks=True)
     else:
         x_all = np.empty((n_sims, n))
         y_all = np.empty((n_sims, n))
@@ -337,7 +345,8 @@ def _power_one_scenario(case_id, n, y_params, k, dt, all_distinct,
 def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                       cases=None, n_distinct_values=None, dist_types=None,
                       n_jobs=1, calibration_mode=None, n_cal=None,
-                      pre_warm=True):
+                      pre_warm=True, disk_cache_dir=None,
+                      save_cache_to_disk=None):
     """Run power analysis for all (or filtered) scenarios.
 
     Parameters
@@ -355,16 +364,31 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
     n_cal : int or None
         Calibration samples per bisection.  When None, uses config N_CAL.
     pre_warm : bool
-        When True (default) and n_jobs != 1, warm the null and calibration
-        caches in the main process before snapshotting them into workers.
+        When True (default), warm the null and calibration caches in the
+        main process before running scenarios.  For parallel runs this
+        populates the snapshot sent to workers; for sequential runs it
+        ensures all cache entries are built upfront (and enables disk save).
         Re-warming an already-warm cache costs only dict lookups (~88 checks,
         microseconds).  Set False only if you have pre-warmed manually and
         want to avoid even that overhead.
+    disk_cache_dir : str or Path or None
+        Directory containing pre-built cache files produced by
+        ``scripts/precompute_caches.py``.  When set, the calibration cache
+        (and null cache when USE_PERMUTATION_PVALUE is True) are loaded from
+        disk before the pre_warm step, making pre_warm effectively instant
+        on a hit.  On a miss or metadata mismatch a UserWarning is issued and
+        caches are built in-process as usual.  Ignored when None (default).
+    save_cache_to_disk : bool or None
+        When True (and disk_cache_dir is set), any caches built in-process
+        during this run are persisted to disk.  When None (default), the
+        effective value comes from config.SAVE_CACHE_TO_DISK.
 
     Returns
     -------
     list of dict
     """
+    from pathlib import Path
+
     if n_sims is None:
         n_sims = N_SIMS
     if n_cal is None:
@@ -400,8 +424,39 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
                               calibration_mode, n_cal))
             scenario_idx += 1
 
+    # Disk cache load (before pre_warm so pre_warm is instant on a hit).
+    _cal_loaded = False
+    _null_loaded = False
+    _cal_path = None
+    _null_path = None
+    if disk_cache_dir is not None:
+        _cal_path = Path(disk_cache_dir) / f"calibration_ncal{n_cal}.pkl"
+        _cal_loaded = load_calibration_caches_from_disk(_cal_path, n_cal)
+        if USE_PERMUTATION_PVALUE:
+            _null_path = Path(disk_cache_dir) / f"null_npre{PVALUE_PRECOMPUTED_N_PRE}.pkl"
+            _null_loaded = load_null_cache_from_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
+
     if n_jobs == 1:
-        return [_power_one_scenario(*args) for args in scenarios]
+        if pre_warm:
+            _eff_cal_mode = calibration_mode if calibration_mode is not None else CALIBRATION_MODE
+            if USE_PERMUTATION_PVALUE:
+                warm_precomputed_null_cache(cases=_cases,
+                                            n_distinct_values=_nvals,
+                                            dist_types=_dtypes)
+            warm_calibration_cache(generator,
+                                   cases=_cases,
+                                   n_distinct_values=_nvals,
+                                   dist_types=_dtypes,
+                                   calibration_mode=_eff_cal_mode,
+                                   n_cal=n_cal)
+        results = [_power_one_scenario(*args) for args in scenarios]
+        _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
+        if disk_cache_dir is not None and _save and pre_warm:
+            if not _cal_loaded:
+                save_calibration_caches_to_disk(_cal_path, n_cal)
+            if USE_PERMUTATION_PVALUE and not _null_loaded:
+                save_null_cache_to_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
+        return results
 
     # Parallel path: warm caches in main process then inject into each worker.
     # Workers (loky spawn on Windows) start with empty module-level dicts;
@@ -423,8 +478,17 @@ def run_all_scenarios(generator="nonparametric", n_sims=None, seed=None,
     null_snap = get_null_cache_snapshot() if USE_PERMUTATION_PVALUE else {}
     cal_snaps = get_calibration_cache_snapshots()
 
-    return Parallel(
+    results = Parallel(
         n_jobs=n_jobs,
         initializer=_init_worker_caches,
         initargs=(null_snap, cal_snaps),
     )(delayed(_power_one_scenario)(*args) for args in scenarios)
+
+    _save = save_cache_to_disk if save_cache_to_disk is not None else SAVE_CACHE_TO_DISK
+    if disk_cache_dir is not None and _save and pre_warm:
+        if not _cal_loaded:
+            save_calibration_caches_to_disk(_cal_path, n_cal)
+        if USE_PERMUTATION_PVALUE and not _null_loaded:
+            save_null_cache_to_disk(_null_path, PVALUE_PRECOMPUTED_N_PRE)
+
+    return results

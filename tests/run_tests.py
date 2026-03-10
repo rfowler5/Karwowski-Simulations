@@ -38,6 +38,7 @@ QUICK_TESTS = [
     # --- Bootstrap / CI ---
     # Depends on data generation working (caught above) but not on calibration.
     ("test_batch_bootstrap_ci.py", []),          # batch vs single bootstrap CI agreement; no calibration dependency
+    ("test_skip_y_ranks.py", []),                # skip-y rank identity: _return_ranks=True matches rank(float y) for all non-empirical generators
 
     # --- Calibration stack (ordered: unit → accuracy → symmetry) ---
     # Precompute first: if the precompute/eval split is broken, later calibration tests
