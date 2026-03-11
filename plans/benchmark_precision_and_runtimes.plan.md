@@ -220,6 +220,94 @@ print(f"T_seq={t_seq:.1f}s  T_par={t_par:.1f}s  speedup={t_seq/t_par:.2f}x")
 
 ---
 
+## Benchmarking data to gather
+
+We gather data from two scripts to populate tier runtimes and validate parallel scaling. Below: what to run, parameters per run, and a log of runs already done.
+
+### 1. `benchmarks/estimate_runtime_model.py`
+
+**Purpose:** Fit runtime models T = C + k×n (power) and T_ci = C_ci + k_ci×(n_reps×n_boot) from single-scenario and (optionally) full-grid runs; report tier predictions and multi-core extrapolation from a measured parallel grid run.
+
+**Runs to gather (per generator):**
+
+| Generator      | Mode   | Parameters | Notes |
+|----------------|--------|------------|--------|
+| empirical      | power  | See below  | Power only; CI optional later. |
+| nonparametric  | both   | TBD        | Power + CI. |
+| copula         | both   | TBD        | Power + CI. |
+| linear         | power  | TBD        | Power only (no CI). |
+| empirical      | ci     | TBD        | CI only (if not done with both). |
+
+**Parameter template (power):**
+
+- `--generators <gen>`
+- `--mode power` (or `both` for power+CI)
+- `--repeats 5` (single-scenario fit reps)
+- `--grid-repeats 5` (full-grid and parallel reps)
+- `--grid-n-sims <n1>,<n2>,<n3>` (e.g. 2000,3000,5000 or 5000,7000,10000)
+- `--grid-parallel` (measure parallel grid for multi-core extrapolation)
+- Optional: `--n-sims` to override default fit points (e.g. 3000,5000,7000,9000,11500)
+
+**Parameter template (CI):**
+
+- `--generators <gen>`
+- `--mode ci` or `both`
+- `--repeats 5`, `--grid-repeats 5`
+- `--grid-ci-params "n_reps1,n_boot1 n_reps2,n_boot2 ..."`
+- `--grid-parallel` for CI parallel measurement
+
+**Data gathered (record in this plan):**
+
+- Single-scenario fit: C, k, R²; fit n_sims and mean times.
+- Grid fit (if --grid-n-sims): C_g, k_g, R²; grid times and per-scenario at each point.
+- Parallel grid time at first grid point (and n_par used).
+- Implied speedup (grid sequential / parallel) at that point.
+- Tier predictions: Single (hot), Grid extrap or Grid fit (hot), Est. 2/4/8/16-core.
+
+**Runs completed:**
+
+| Date / run | Generator | Mode | Command / parameters | Key results |
+|------------|-----------|------|----------------------|-------------|
+| 2026-03 (run 1) | empirical | power | `--generators empirical --grid-parallel --mode power --repeats 5 --grid-repeats 5 --grid-n-sims 2000,3000,5000` | Full warmup (88 scenarios). Single-scenario fit: n_sims=3000,5000,7000,9000,11500 (5 reps); C=0.29s, k=3.44e-04, R²=0.9917. Grid fit: C_g=0.12s, k_g=4.25e-04, R²=0.9986; grid at 2000=86.8s seq, 3000=120.1s, 5000=198.2s (5 reps). Parallel at n_sims=2000 = 33.0s (5 reps). Speedup 86.8/33.0 ≈ 2.63×. Est. 2-core ±0.01 = 36.7s, ±0.002 = 15.3 min, ±0.001 = 1.02 hrs. |
+
+---
+
+### 2. `benchmarks/benchmark_realistic_runtimes.py`
+
+**Purpose:** Measure per-generator runtimes (power + CI) at small params, sequential and parallel; scale to three precision tiers; report best config and high-core estimates (physical cores, efficiency_phys).
+
+**Runs to gather (per generator):**
+
+| Generator      | Power | CI   | Notes |
+|----------------|-------|------|--------|
+| nonparametric  | yes   | yes  | |
+| copula         | yes   | yes  | |
+| linear         | yes   | no   | CI not supported. |
+| empirical      | yes   | yes  | Requires digitized data. |
+
+**Parameter template:**
+
+- `--generators all` or `nonparametric,copula,linear,empirical` (filter as needed)
+- `--power-only` or `--ci-only` to restrict (optional)
+- Default benchmark params (in script): n_sims=50 (N_SIMS_BENCH), n_cal=300, n_reps=200, n_boot=500
+- `--quick`: single-scenario only (no full grid)
+- `--skip-parallel`: skip n_jobs=-1 runs
+
+**Data gathered (record in this plan):**
+
+- Per-generator: Single (seq), Grid seq, Grid par; scaled columns for ±0.01, ±0.002, ±0.001.
+- Combined table: Best config (this machine), Est. 8-core, Est. 16-core (physical).
+- Which of seq/par was faster for power and for CI on this machine.
+- Cold-start tier table (if run without --quick).
+
+**Runs completed:**
+
+| Date / run | Generators | Params | Key results |
+|------------|------------|--------|-------------|
+| (none yet) | —          | —      | —           |
+
+---
+
 ## Key files to reference
 
 - [power_simulation.py](power_simulation.py): `estimate_power`, `min_detectable_rho`, `run_all_scenarios`

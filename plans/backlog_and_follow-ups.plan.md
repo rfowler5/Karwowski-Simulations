@@ -17,7 +17,32 @@ Reminder list (minimal detail; you will flesh out when doing each).
    - *(Skip-y docs and links are done.)*
 
 2. **Harden code per Claude suggestion**
-   - Apply the hardening suggestions from the other conversation (you will know which).
+   - Apply the hardening suggestions. Claude's suggestion is below. Consider if it is worth it and if so, implement.
+
+   B3 — Add post-bisection assertion in calibration callers
+Files: data_generator.py — in calibrate_rho (single-point path)
+and calibrate_rho_empirical (single-point path), after the call to
+_bisect_for_probe / _bisect_for_probe_empirical returns.
+Change: After the bisection returns calibrated_probe, add an
+assertion that the returned value actually achieves near the probe:
+python# Verify the bisection landed on the correct side of any discontinuity
+val = _eval_mean_rho(calibrated_probe, *arrays)
+if abs(val - probe) > 0.05:
+    import warnings
+    warnings.warn(
+        f"Calibration bisection returned rho_in={calibrated_probe:.6f} "
+        f"but _eval_mean_rho={val:.4f} (probe={probe}). "
+        f"Possible step discontinuity not resolved. "
+        f"Consider increasing n_cal or checking tie structure.",
+        UserWarning, stacklevel=3
+    )
+Why a warning rather than an assertion error: A hard assertion would
+crash production runs. A warning surfaces the problem while allowing the
+run to continue with the best available answer.
+Constraint: Only add this in the single-point path where
+_bisect_for_probe is called and arrays is in scope. Do not add it
+in the multipoint path (different structure). Do not change any other
+logic.
 
 3. **Run benchmarks and record results**
    - Execute benchmarks and document results (e.g. per [.cursor/rules/benchmarking.mdc](../.cursor/rules/benchmarking.mdc) if applicable).

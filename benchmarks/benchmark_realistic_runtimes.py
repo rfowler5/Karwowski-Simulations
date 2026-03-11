@@ -116,6 +116,16 @@ def run():
         return
 
     logical_cores, physical_cores = _machine_info()
+    # this_phys: physical cores used as the parallelism unit for core-scaling formulas.
+    # Falls back to logical when psutil is unavailable.
+    this_phys = physical_cores if isinstance(physical_cores, int) else logical_cores
+    # ht_ratio: logical cores per physical core (hyperthreading multiplier on this machine).
+    ht_ratio = logical_cores / this_phys
+    # EFFICIENCY = 0.5 was empirically measured as T_seq / (logical_cores * T_par).
+    # efficiency_phys re-expresses this relative to physical cores so that extrapolation
+    # columns labelled "N-core" mean N physical cores, consistent with the measured-parallel
+    # formula below.  T_par ≈ T_seq / (P_phys * efficiency_phys).
+    efficiency_phys = EFFICIENCY * ht_ratio
 
     case = CASES[CASE_ID]
     n_single = case["n"]
@@ -126,7 +136,7 @@ def run():
     print("=" * 70)
     print(f"Params: n_sims={N_SIMS_BENCH}, n_cal={N_CAL_BENCH}, n_reps={N_REPS_BENCH}, n_boot={N_BOOT_BENCH}")
     print(f"Power generators: {power_gens}.  CI generators: {ci_gens}.")
-    print(f"Measured on: {logical_cores}-logical-core machine (physical: {physical_cores}), Numba enabled.")
+    print(f"Measured on: {physical_cores} physical / {logical_cores} logical cores, Numba enabled.")
     print()
 
     # --- JIT warmup (n_cal=1 so warmup cache entries don't pollute cold-cache timing) ---
@@ -350,16 +360,19 @@ def run():
                  for i in range(3)]
     combined_scaled = [power_scaled[i] + ci_scaled[i] for i in range(3)]
 
-    # High-core estimates (power only, using parallel time if it was measured and wins).
-    # Cache cost at N target cores: (t_cal_all + t_null_build) / N (workers share scenarios).
-    # Simulation scales as power_sim_for_scaling * (this_cores / N) / efficiency.
+    # High-core estimates (power only, using measured parallel time when it wins).
+    # Simulation formula: T_target = T_measured * (this_phys / N_phys).
+    # No efficiency factor — power_sim_for_scaling is already a measured parallel time
+    # (minus cache overhead), so all real-world overhead is already baked in.
+    # Cache cost: workers on the target machine split 88 scenarios across N_phys * ht_ratio
+    # logical workers, so wall-clock cache cost ≈ total_cache / (N_phys * ht_ratio).
     if not args.quick and not args.skip_parallel and power_best_is_par and power_grid_par_tot > 0:
-        t_cache_8  = (t_cal_all + t_null_build) / 8
-        t_cache_16 = (t_cal_all + t_null_build) / 16
-        est_8  = power_sim_for_scaling * (logical_cores / 8)  / EFFICIENCY + t_cache_8  + ci_sim_for_scaling
-        est_16 = power_sim_for_scaling * (logical_cores / 16) / EFFICIENCY + t_cache_16 + ci_sim_for_scaling
-        est_8_scaled  = [power_sim_for_scaling * (logical_cores / 8)  / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_8  + ci_scaled[i] for i in range(3)]
-        est_16_scaled = [power_sim_for_scaling * (logical_cores / 16) / EFFICIENCY * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_16 + ci_scaled[i] for i in range(3)]
+        t_cache_8  = (t_cal_all + t_null_build) / (8  * ht_ratio)
+        t_cache_16 = (t_cal_all + t_null_build) / (16 * ht_ratio)
+        est_8  = power_sim_for_scaling * (this_phys / 8)  + t_cache_8  + ci_sim_for_scaling
+        est_16 = power_sim_for_scaling * (this_phys / 16) + t_cache_16 + ci_sim_for_scaling
+        est_8_scaled  = [power_sim_for_scaling * (this_phys / 8)  * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_8  + ci_scaled[i] for i in range(3)]
+        est_16_scaled = [power_sim_for_scaling * (this_phys / 16) * (POWER_TIERS[i][0] / N_SIMS_BENCH) + t_cache_16 + ci_scaled[i] for i in range(3)]
     else:
         est_8 = est_16 = None
         est_8_scaled = est_16_scaled = [None] * 3
@@ -441,8 +454,8 @@ def run():
         print("=== COMBINED (Power + CI) Full Grid, All Generators ===")
         print('    "Best config" = for each of power and CI, use whichever of seq/par was faster on this machine, then sum.')
         print()
-        print("Tier      | Best config (this machine) | Est. 8-core | Est. 16-core")
-        print("-" * 75)
+        print("Tier      | Best config (this machine) | Est. 8-core | Est. 16-core   (physical cores)")
+        print("-" * 85)
         meas_best = _fmt_time_sec(combined_best) if not args.quick else "-"
         e8_meas = _fmt_time_sec(est_8) if est_8 is not None else "-"
         e16_meas = _fmt_time_sec(est_16) if est_16 is not None else "-"
@@ -464,7 +477,9 @@ def run():
                        if ci_best_is_par else "")
             print(f"    Power best: {pw_best} ({_fmt_time_sec(power_best_tot)}){pw_note}.")
             print(f"    CI best: {ci_best_str} ({_fmt_time_sec(ci_best_tot)}){ci_note}.")
-        print("    Higher-core scaling (power only, if par wins): sim scaled by (this_cores / target_cores) / efficiency; cache scaled by 1 / target_cores.")
+        print(f"    Higher-core scaling (power only, if par wins, physical-core columns):")
+        print(f"      sim: T_measured * (this_phys / N_phys) — no efficiency factor, measured time already includes real overhead.")
+        print(f"      cache: total_cache / (N_phys * ht_ratio), where ht_ratio={ht_ratio:.1f} (logical/physical on this machine).")
         print("    CI with batch bootstrap: if seq is faster at small params, parallel may still win at high n_reps (see one-off benchmark).")
         print()
 
@@ -539,7 +554,9 @@ def run():
     print("    when the Cold-start table is added. When par wins, estimated cold-cache wall time")
     print(f"    (~(t_cal + t_null) / n_workers ≈ {_fmt_time_sec(t_cache_par_bench)} at bench params) is subtracted before scaling.")
     print("    This removes the fixed overhead that would otherwise be scaled up linearly (~20% overestimate at ±0.001).")
-    print("  - Power parallel scaling to N cores: sim scaled by (this_cores / N) / 0.5; cache by 1/N (workers split scenarios).")
+    print("  - Power parallel scaling (Est. 8/16-core columns = physical cores):")
+    print("      sim: T_measured * (this_phys / N_phys) — no efficiency factor (already baked into measured time).")
+    print(f"      cache: total_cache / (N_phys * ht_ratio), ht_ratio={ht_ratio:.1f} on this machine (assumes same HT ratio on target).")
     print("  - CI with batch bootstrap: parallel is often slower than sequential on this machine (joblib overhead + cold-cache in workers).")
     print("  - On higher-core machines with very high n_reps, the per-scenario time may be large enough for parallel to help; benchmark on your machine.")
 

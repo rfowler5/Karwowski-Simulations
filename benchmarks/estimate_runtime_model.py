@@ -45,10 +45,10 @@ n size for good estimates:
     (null + calibration) are pre-warmed before grid runs so every grid point
     measures steady-state simulation cost only.
 
-Multi-core extrapolation:
-  Without --grid-parallel, multi-core estimates use a rough formula:
-  T_par_est = T_seq / (P * 0.5).  Pass --grid-parallel to run the full grid
-  once with n_jobs=-1 and extrapolate from the measured parallel time.
+Multi-core extrapolation (physical cores):
+  With --grid-parallel: T_target = T_measured * (this_phys / N_phys).
+  No efficiency factor — the measured time already includes real-world overhead.
+  Without --grid-parallel: rough formula T_par_est = T_seq / (P_phys * 0.5).
 """
 import os
 import sys
@@ -80,16 +80,18 @@ N_DISTINCT_SINGLE = 4
 EFFICIENCY = 0.5  # empirical parallel efficiency (benchmark_realistic_runtimes)
 
 FIT_N_SIMS_BY_GENERATOR = {
-    "empirical":     [50, 75, 100],
+    #[50, 75, 100], # Used when empirical did not have precomputed null cause took to long; leaving in case want to measure that again sometime.
+    "empirical":     [3000, 5000, 7000, 9000, 11500],
     "nonparametric": [2000, 5000, 10000],
     "copula":        [2000, 5000, 10000],
     "linear":        [2000, 5000, 10000],
 }
 
 FIT_CI_PARAMS_BY_GENERATOR = {
-    "empirical":     [(5, 10), (8, 15), (10, 20)],
-    "nonparametric": [(20, 50), (40, 100), (60, 150)],
-    "copula":        [(20, 50), (40, 100), (60, 150)],
+    # [(5, 10), (8, 15), (10, 20)], # Used when empirical did not have precomputed null cause took to long; leaving in case want to measure that again sometime.
+    "empirical":     [(500, 300), (800, 400), (1100, 500)],
+    "nonparametric": [(40, 50), (80, 100), (160, 150)],
+    "copula":        [(40, 50), (80, 100), (160, 150)],
 }
 
 
@@ -176,6 +178,19 @@ def main():
         sys.exit(1)
     mode = args.mode.lower()
     logical_cores, physical_cores = _machine_info()
+    # this_phys: physical cores used as the parallelism unit for all core-scaling
+    # formulas below.  Falls back to logical when psutil is unavailable.
+    this_phys = physical_cores if isinstance(physical_cores, int) else logical_cores
+    # ht_ratio: average logical cores per physical core (hyperthreading multiplier).
+    # Used to convert EFFICIENCY (calibrated vs. logical workers) to efficiency_phys
+    # (calibrated vs. physical cores), so that ROUGH estimates use physical-core columns
+    # that are consistent with the measured-parallel columns (which also use physical cores).
+    ht_ratio = logical_cores / this_phys
+    # EFFICIENCY = 0.5 was measured as T_seq / (logical_cores * T_par).
+    # efficiency_phys = EFFICIENCY * ht_ratio re-expresses this relative to physical cores,
+    # so T_par ≈ T_seq / (P_phys * efficiency_phys) gives the same number as
+    # T_seq / (P_logical * EFFICIENCY) but with columns labelled in physical cores.
+    efficiency_phys = EFFICIENCY * ht_ratio
 
     # Resolve mode: linear has no CI
     if generator == "linear":
@@ -328,6 +343,22 @@ def main():
         print("Caches warm.\n")
     else:
         print()
+        # When not running a grid, warm null + calibration for the single
+        # scenario used in the power fit so all fit points are hot (no
+        # first-point cold cache build biasing C/k).
+        if mode in ("power", "both"):
+            warm_precomputed_null_cache(
+                cases={args.case: case},
+                n_distinct_values=[N_DISTINCT_SINGLE],
+                dist_types=[DIST_TYPE_SINGLE],
+                n_pre=N_PRE_BENCH, seed=args.seed)
+            warm_calibration_cache(
+                generator, y_params,
+                cases={args.case: case},
+                n_distinct_values=[N_DISTINCT_SINGLE],
+                dist_types=[DIST_TYPE_SINGLE],
+                calibration_mode="multipoint",
+                n_cal=N_CAL_BENCH, seed=99)
 
     has_cold = (t_null_build is not None and t_cal_bench is not None)
     # Outer-scope storage for tier sim times; populated inside power/CI blocks
@@ -516,33 +547,41 @@ def main():
         # Multi-core extrapolation (power full grid)
         if T_par_power_measured is not None:
             print("Multi-core extrapolation (power full grid, from measured n_jobs=-1 run):")
-            print(f"  This machine: {logical_cores} logical cores. Formula: T_par_tier * (this_cores / N) / {EFFICIENCY}.")
-            print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
-            print("-" * 55)
+            print(f"  This machine: {physical_cores} physical / {logical_cores} logical cores.")
+            print(f"  Formula: T_par_tier * (this_phys / N_phys).  No efficiency factor — measured time already includes real overhead.")
+            print(f"Tier       | Est. {this_phys}-core | Est. 4-core | Est. 8-core | Est. 16-core")
+            print("-" * 67)
             for i, (n_tier, _) in enumerate(POWER_TIERS):
                 T_par_tier = T_par_power_measured * (n_tier / n_par_power)
-                e4 = T_par_tier * (logical_cores / 4) / EFFICIENCY
-                e8 = T_par_tier * (logical_cores / 8) / EFFICIENCY
-                e16 = T_par_tier * (logical_cores / 16) / EFFICIENCY
-                print(f"{tier_labels[i]:<10} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
+                e_this = T_par_tier
+                e4 = T_par_tier * (this_phys / 4)
+                e8 = T_par_tier * (this_phys / 8)
+                e16 = T_par_tier * (this_phys / 16)
+                print(f"{tier_labels[i]:<10} | {_fmt_time_sec(e_this):>11} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
             print()
         else:
-            print("Multi-core extrapolation (power full grid, ROUGH: sequential / P / 0.5):")
+            print("Multi-core extrapolation (power full grid, ROUGH: sequential / P_phys / efficiency_phys):")
+            print(f"  This machine: {physical_cores} physical / {logical_cores} logical cores.")
+            print(f"  efficiency_phys = EFFICIENCY({EFFICIENCY}) * ht_ratio({ht_ratio:.1f}) = {efficiency_phys:.2f}  (columns are physical cores)")
             print("  Run with --grid-parallel for measured n_jobs=-1 and reliable extrapolation.")
-            print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
-            print("-" * 55)
+            print(f"Tier       | Est. {this_phys}-core | Est. 4-core | Est. 8-core | Est. 16-core")
+            print("-" * 67)
             for i, (n_tier, _) in enumerate(POWER_TIERS):
                 if has_grid_fit:
                     t_seq = N_GRID_SCENARIOS * (C_g + k_g * n_tier)
                 else:
                     t_seq = N_GRID_SCENARIOS * (C + k * n_tier)
                 if t_seq <= 0:
-                    print(f"{tier_labels[i]:<10} | (neg)       | (neg)       | (neg)")
+                    print(f"{tier_labels[i]:<10} | {'(neg)':>11} | {'(neg)':>11} | {'(neg)':>11} | {'(neg)':>12}")
                 else:
-                    e4 = t_seq / 4 / EFFICIENCY
-                    e8 = t_seq / 8 / EFFICIENCY
-                    e16 = t_seq / 16 / EFFICIENCY
-                    print(f"{tier_labels[i]:<10} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
+                    # T_par ≈ T_seq / (P_phys * efficiency_phys)
+                    # efficiency_phys absorbs both the joblib overhead and HT ratio so that
+                    # P_phys=4 means "4 physical cores" (≈8 logical workers with typical HT).
+                    e_this = t_seq / this_phys / efficiency_phys
+                    e4 = t_seq / 4 / efficiency_phys
+                    e8 = t_seq / 8 / efficiency_phys
+                    e16 = t_seq / 16 / efficiency_phys
+                    print(f"{tier_labels[i]:<10} | {_fmt_time_sec(e_this):>11} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
             print()
 
     # --- CI fit ---
@@ -721,23 +760,27 @@ def main():
         # Multi-core extrapolation (CI full grid)
         if T_par_ci_measured is not None and nr_par_ci is not None and nb_par_ci is not None:
             print("Multi-core extrapolation (CI full grid, from measured n_jobs=-1 run):")
-            print(f"  This machine: {logical_cores} logical cores. Formula: T_par_tier * (this_cores / N) / {EFFICIENCY}.")
-            print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
-            print("-" * 55)
+            print(f"  This machine: {physical_cores} physical / {logical_cores} logical cores.")
+            print(f"  Formula: T_par_tier * (this_phys / N_phys).  No efficiency factor — measured time already includes real overhead.")
+            print(f"Tier       | Est. {this_phys}-core | Est. 4-core | Est. 8-core | Est. 16-core")
+            print("-" * 67)
             prod_par = nr_par_ci * nb_par_ci
             for i, (nr_tier, nb_tier, _) in enumerate(CI_TIERS):
                 prod_tier = nr_tier * nb_tier
                 T_par_tier = T_par_ci_measured * (prod_tier / prod_par)
-                e4 = T_par_tier * (logical_cores / 4) / EFFICIENCY
-                e8 = T_par_tier * (logical_cores / 8) / EFFICIENCY
-                e16 = T_par_tier * (logical_cores / 16) / EFFICIENCY
-                print(f"{tier_labels_ci[i]:<10} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
+                e_this = T_par_tier
+                e4 = T_par_tier * (this_phys / 4)
+                e8 = T_par_tier * (this_phys / 8)
+                e16 = T_par_tier * (this_phys / 16)
+                print(f"{tier_labels_ci[i]:<10} | {_fmt_time_sec(e_this):>11} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
             print()
         else:
-            print("Multi-core extrapolation (CI full grid, ROUGH: sequential / P / 0.5):")
+            print("Multi-core extrapolation (CI full grid, ROUGH: sequential / P_phys / efficiency_phys):")
+            print(f"  This machine: {physical_cores} physical / {logical_cores} logical cores.")
+            print(f"  efficiency_phys = EFFICIENCY({EFFICIENCY}) * ht_ratio({ht_ratio:.1f}) = {efficiency_phys:.2f}  (columns are physical cores)")
             print("  Run with --grid-parallel for measured n_jobs=-1 and reliable extrapolation.")
-            print("Tier       | Est. 4-core | Est. 8-core | Est. 16-core")
-            print("-" * 55)
+            print(f"Tier       | Est. {this_phys}-core | Est. 4-core | Est. 8-core | Est. 16-core")
+            print("-" * 67)
             for i, (nr_tier, nb_tier, _) in enumerate(CI_TIERS):
                 prod_tier = nr_tier * nb_tier
                 if has_grid_ci_fit:
@@ -745,12 +788,14 @@ def main():
                 else:
                     t_seq = N_GRID_SCENARIOS * (C_ci + k_ci * prod_tier)
                 if t_seq <= 0:
-                    print(f"{tier_labels_ci[i]:<10} | (neg)       | (neg)       | (neg)")
+                    print(f"{tier_labels_ci[i]:<10} | {'(neg)':>11} | {'(neg)':>11} | {'(neg)':>11} | {'(neg)':>12}")
                 else:
-                    e4 = t_seq / 4 / EFFICIENCY
-                    e8 = t_seq / 8 / EFFICIENCY
-                    e16 = t_seq / 16 / EFFICIENCY
-                    print(f"{tier_labels_ci[i]:<10} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
+                    # T_par ≈ T_seq / (P_phys * efficiency_phys); see power ROUGH block for derivation.
+                    e_this = t_seq / this_phys / efficiency_phys
+                    e4 = t_seq / 4 / efficiency_phys
+                    e8 = t_seq / 8 / efficiency_phys
+                    e16 = t_seq / 16 / efficiency_phys
+                    print(f"{tier_labels_ci[i]:<10} | {_fmt_time_sec(e_this):>11} | {_fmt_time_sec(e4):>11} | {_fmt_time_sec(e8):>11} | {_fmt_time_sec(e16):>12}")
             print()
 
     # Combined cold-start block (only when both power and CI were fitted)
@@ -788,10 +833,17 @@ def main():
     print("  - R^2 < 0.99 suggests measurement noise; re-run with --repeats 3 and/or larger n_sims.")
     print("  - Null + calibration caches are pre-warmed before grid runs; cold-start columns above")
     print("    show the full first-run cost including cache build at each tier's n_pre / n_cal.")
-    print("  - Grid par cold-cache: workers spawn fresh — each rebuilds calibration and null.")
-    print("    Parallel would match sequential hot if workers loaded disk-precomputed caches.")
-    print("  - Multi-core: without --grid-parallel, 4/8/16-core estimates are ROUGH (sequential/P/0.5).")
-    print("    Use --grid-parallel to run the grid with n_jobs=-1 once for measured extrapolation.")
+    print("  - Grid par (default): run_all_scenarios pre-warms caches in the main process and")
+    print("    injects them into workers via the joblib initializer, so measured parallel time is hot-cache.")
+    print("    Without pre-warm, grid par would be cold-cache: workers spawn fresh — each rebuilds")
+    print("    calibration and null; parallel would match sequential hot only if workers loaded disk caches.")
+    print("  - Multi-core columns are physical cores.")
+    print("    With --grid-parallel: T_target = T_measured * (this_phys / N_phys).")
+    print("      No efficiency factor — measured time already includes real-world overhead.")
+    print("    Without --grid-parallel (ROUGH): T_target = T_seq / (P_phys * efficiency_phys),")
+    print(f"      where efficiency_phys = EFFICIENCY({EFFICIENCY}) * ht_ratio(logical/physical).")
+    print("      This converts EFFICIENCY (calibrated vs logical workers) to physical-core units,")
+    print("      so 'Est. 4-core' means 4 physical cores regardless of whether --grid-parallel was used.")
 
 
 if __name__ == "__main__":
